@@ -499,6 +499,22 @@ class AlibabaCloudChallengeDriver:
             if data:
                 (self.artifacts_dir / f"challenge-{reason}-{name}-{ts}.png").write_bytes(data)
 
+    def _dump_panel(self, page: Page, reason: str) -> None:
+        """Screenshot the widget panel post-verdict — shows where the
+        piece actually landed vs the visible cutout."""
+        try:
+            frame = self._find_widget_frame(page)
+            panel = frame.query_selector(PANEL_SELECTOR) if frame else None
+            if panel is None:
+                return
+            self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            panel.screenshot(
+                path=str(self.artifacts_dir / f"challenge-panel-{reason}-{ts}.png")
+            )
+        except Exception:
+            pass
+
     def _reload_widget(self, page: Page) -> Frame:
         """A rejected attempt must reload the widget — never re-drag on a
         dead puzzle."""
@@ -693,6 +709,7 @@ class AlibabaCloudChallengeDriver:
                 # the previous panel instance is dead.
                 log.warning("challenge attempt %d rejected by server", attempt)
                 self._dump_puzzle("server_rejected")
+                self._dump_panel(page, "server_rejected")
                 continue
             if self._attempt_succeeded(frame):
                 token = self._read_token(page, frame, timeout_ms=2000)
