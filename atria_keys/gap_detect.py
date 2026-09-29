@@ -74,6 +74,72 @@ def detect_with_piece(bg_bytes: bytes, piece_bytes: bytes) -> GapDetection:
     return GapDetection(float(max_loc[0]), float(max_val), "template")
 
 
+def _content_mask(piece: np.ndarray) -> np.ndarray | None:
+    """Mask of the piece's real content. Pieces with an alpha channel are
+    exact (alpha>0); opaque pieces fall back to 'different from the most
+    common corner colour'."""
+    if piece.shape[2] == 4:
+        return piece[:, :, 3] > 10
+    gray = cv2.cvtColor(piece, cv2.COLOR_BGR2GRAY)
+    border = np.concatenate(
+        [gray[0], gray[-1], gray[:, 0], gray[:, -1]]
+    )
+    bg_tone = float(np.median(border))
+    return np.abs(gray.astype(np.float32) - bg_tone) > 24
+
+
+def detect_sparse_piece(bg_bytes: bytes, piece_bytes: bytes) -> GapDetection:
+    """Sparse-content piece (e.g. a swirl or speckles on transparency):
+    the cut strip's content is the ORIGINAL pixels, removed from the
+    background which was then inpainted. The hole is the column window
+    whose texture is missing relative to its neighbours — computed only
+    over the mask's own rows and columns, not the whole strip."""
+    bg = _decode(bg_bytes)
+    pc = cv2.imdecode(np.frombuffer(piece_bytes, np.uint8), cv2.IMREAD_UNCHANGED)
+    if pc is None:
+        return GapDetection(0.0, 0.0, "sparse")
+    bg = bg[:, :, :3]
+    mask = _content_mask(pc)
+    h, w = bg.shape[:2]
+    pw = pc.shape[1]
+    if pc.shape[0] < h:
+        mask = np.vstack([mask, np.zeros((h - pc.shape[0], pw), bool)])
+    rows = np.any(mask, axis=1)
+    cols = np.any(mask, axis=0)
+    if not rows.any() or not cols.any():
+        return GapDetection(0.0, 0.0, "sparse")
+    y0, y1 = int(np.argmax(rows)), int(len(rows) - np.argmax(rows[::-1]))
+    c0, c1 = int(np.argmax(cols)), int(len(cols) - np.argmax(cols[::-1]))
+    gray = cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1)
+    tex = np.sqrt(gx * gx + gy * gy)
+    band = tex[y0:y1]
+    cw = max(4, c1 - c0)
+    margin = max(12, cw // 2)
+    scores = []
+    xs = []
+    for x in range(0, w - pw):
+        hx0, hx1 = x + c0, x + c1
+        inside = band[:, hx0:hx1].mean()
+        lseg = band[:, max(0, hx0 - margin):hx0]
+        rseg = band[:, hx1:hx1 + margin]
+        left = lseg.mean() if lseg.size else inside
+        right = rseg.mean() if rseg.size else inside
+        xs.append(x)
+        scores.append((left + right) / 2.0 - inside)
+    if not xs:
+        return GapDetection(0.0, 0.0, "sparse")
+    scores = np.asarray(scores)
+    # Missing-texture dip is the whole signal: the hole was inpainted,
+    # so the piece's original pixels match nothing — template scores
+    # only add red-on-red false positives.
+    best_i = int(np.argmax(scores))
+    median = float(np.median(scores)) + 1e-9
+    conf = min(1.0, max(0.0, (float(scores[best_i]) - median) / (abs(median) + 4.0)))
+    return GapDetection(float(xs[best_i]), conf, "sparse")
+
+
 def _is_strip(bg: np.ndarray, piece: np.ndarray) -> bool:
     """Any full-height piece narrower than the background — strip widths
     vary between widget variants (23px on 'qst', ~100px on chunkier
@@ -154,9 +220,25 @@ def detect_gap_x(
     if piece_bytes:
         try:
             bg = _decode(bg_bytes)
-            piece = _decode(piece_bytes)
+            pc4 = cv2.imdecode(
+                np.frombuffer(piece_bytes, np.uint8), cv2.IMREAD_UNCHANGED
+            )
+            if pc4 is None:
+                return GapDetection(0.0, 0.0, "unresolved")
+            piece = pc4[:, :, :3] if pc4.shape[2] >= 3 else _decode(piece_bytes)
         except ValueError:
             return GapDetection(0.0, 0.0, "unresolved")
+        if float(_content_mask(pc4).mean()) < 0.5:
+            # Sparse-content piece: its pixels are the ORIGINAL cut content
+            # on a mostly-transparent strip — seam/template routines key on
+            # the empty edges and fabricate confident garbage.
+            det = detect_sparse_piece(bg_bytes, piece_bytes)
+            if det.confidence >= CONFIDENCE_TEMPLATE_ACCEPT:
+                return det
+            log.info(
+                "sparse detection weak (%.2f) — trying classic chain",
+                det.confidence,
+            )
         if _is_strip(bg, piece):
             det = detect_strip_seam(bg_bytes, piece_bytes)
             if det.confidence >= CONFIDENCE_TEMPLATE_ACCEPT:
