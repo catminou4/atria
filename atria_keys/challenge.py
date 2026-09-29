@@ -36,6 +36,7 @@ from .gap_detect import (
     CONFIDENCE_ACCEPT,
     CONFIDENCE_TEMPLATE_ACCEPT,
     detect_gap_x,
+    image_width,
 )
 
 log = logging.getLogger("atria_keys.challenge")
@@ -397,15 +398,21 @@ class AlibabaCloudChallengeDriver:
                 # CCOEFF on edge maps saturates well below 1.0.
                 if det.method in ("template", "strip") and confidence >= CONFIDENCE_TEMPLATE_ACCEPT:
                     confidence = 0.7 + confidence * 0.3
+                # det.gap_x is in source-image pixels (raw src natural size,
+                # or screenshot px at device_scale_factor>1); the drag needs
+                # CSS px. Rescale through the rendered background box.
+                ibox = bg_el.bounding_box() or track.bounding_box()
+                img_w = image_width(bg_bytes)
+                css_scale = ibox["width"] / img_w if (ibox and img_w) else 1.0
+                gap_css = det.gap_x * css_scale
                 # Piece element's current x → distance = gap - piece_x.
                 # Origin is the background image box (on v2 widgets the
                 # slider bar sits below the puzzle and offsets differ).
-                distance = det.gap_x
+                distance = gap_css
                 if piece_el is not None:
                     pbox = piece_el.bounding_box()
-                    ibox = bg_el.bounding_box() or track.bounding_box()
                     if pbox and ibox:
-                        distance = det.gap_x - (pbox["x"] - ibox["x"])
+                        distance = gap_css - (pbox["x"] - ibox["x"])
                 self._last_puzzle = {
                     "bg": bg_bytes, "piece": piece_bytes or b"",
                     "gap_x": det.gap_x, "distance": distance,

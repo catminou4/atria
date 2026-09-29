@@ -32,6 +32,12 @@ class GapDetection:
     method: str
 
 
+def image_width(img_bytes: bytes) -> int | None:
+    arr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    return int(img.shape[1]) if img is not None else None
+
+
 def _decode(img_bytes: bytes) -> np.ndarray:
     arr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
