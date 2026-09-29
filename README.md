@@ -91,10 +91,15 @@ Verified end-to-end against the production surface:
 - **The residual gate is server-side risk scoring, not the slide.**
   `POST auth.atria-asi.ai/api/experience/captcha/verify` returns
   `{"success":false}` for every attempt — including a **real hardware
-  mouse drag** on a physical display and macOS CGEvent input — so the
-  verdict binds to the *session/environment* (browser attestation,
-  profile, IP reputation), not to trajectory realism. Stronger input
-  synthesis cannot close this gap from this machine.
+  mouse drag** on a physical display, a fully manual flow on normally-
+  launched retail Chrome (no Playwright, no debug flags), and a session
+  with every fixable fingerprint corrected (retail binary, Apple-M2 WebGL
+  renderer spoofed over the VM's "Apple Paravirtual device", retina
+  devicePixelRatio 2, realistic viewport, real plugins/UA brands,
+  webdriver hidden). The verdict therefore binds to the **egress
+  environment itself** — most plausibly the datacenter ASN
+  (AS "Cognition AI, Inc." / Portland) — not to gesture realism,
+  browser binary, or page-visible fingerprint.
 - Failure rendering: widget folds back to the opener and the page shows
   `error.captcha_verification_failed` — this is the signal
   `_server_rejected()` checks; panel-close alone is a false positive.

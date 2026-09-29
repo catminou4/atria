@@ -69,12 +69,15 @@ class BrowserDriver:
         headless = bool(self.cfg.get("browser.headless", True))
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
         channel = self.cfg.get("browser.channel")  # "chrome" = retail binary
+        vp = self.cfg.get("browser.viewport") or {"width": 1440, "height": 900}
         self.context = self._pw.chromium.launch_persistent_context(
             user_data_dir=str(self.user_data_dir),
             headless=headless,
             channel=channel or None,
             slow_mo=int(self.cfg.get("browser.slow_mo_ms", 0)),
-            viewport={"width": 1280, "height": 800},
+            viewport=vp,
+            # Retina Mac scale — dpr=1 is a VM tell.
+            device_scale_factor=float(self.cfg.get("browser.device_scale_factor", 2)),
             args=[
                 # Otherwise navigator.webdriver stays true and the risk
                 # engine flags the session pre-slide.
@@ -86,6 +89,28 @@ class BrowserDriver:
         self.context.on("response", self._capture_response)
         self.context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        renderer = self.cfg.get(
+            "browser.webgl_renderer",
+            "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+        )
+        vendor = self.cfg.get("browser.webgl_vendor", "Google Inc. (Apple)")
+        # VM GPU ("Apple Paravirtual device") is a hard bot tell — present a
+        # real Apple Silicon renderer string instead.
+        self.context.add_init_script(
+            f"""(() => {{
+              const R = {renderer!r}, V = {vendor!r};
+              const patch = (proto) => {{
+                const gp = proto.getParameter;
+                proto.getParameter = function (p) {{
+                  if (p === 0x9245) return V;   // UNMASKED_VENDOR_WEBGL
+                  if (p === 0x9246) return R;   // UNMASKED_RENDERER_WEBGL
+                  return gp.call(this, p);
+                }};
+              }};
+              patch(WebGLRenderingContext.prototype);
+              if (window.WebGL2RenderingContext) patch(WebGL2RenderingContext.prototype);
+            }})();"""
         )
         self.page = self.context.new_page()
 
