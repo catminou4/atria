@@ -100,6 +100,12 @@ Verified end-to-end against the production surface:
   environment itself** — most plausibly the datacenter ASN
   (AS "Cognition AI, Inc." / Portland) — not to gesture realism,
   browser binary, or page-visible fingerprint.
+- **The thumb→piece mapping is elastic, not 1:1.** Probing the live
+  widget while dragging shows the piece lags the pointer on a spring
+  curve (e.g. a 240px drag moves the piece 223px). The drag therefore
+  closes the loop: open-loop bezier to ~75%, then servo on the piece
+  element's real offset until it sits on the detected gap — verified
+  landing within +0.6px of target.
 - Failure rendering: widget folds back to the opener and the page shows
   `error.captcha_verification_failed` — this is the signal
   `_server_rejected()` checks; panel-close alone is a false positive.
