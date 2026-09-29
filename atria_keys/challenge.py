@@ -417,10 +417,11 @@ class AlibabaCloudChallengeDriver:
                     "bg": bg_bytes, "piece": piece_bytes or b"",
                     "gap_x": det.gap_x, "distance": distance,
                 }
-                # Closed-loop servo target: the piece element offset the
-                # widget must reach (elastic thumb->piece mapping means a
-                # blind drag of `distance` lands short — see probe).
-                self._servo_target = (piece_el, bg_el, gap_css) if piece_el else None
+                # Closed-loop servo target: the piece offset (relative to
+                # the bg box) the widget must reach. Elements are
+                # re-queried inside the drag — the widget may swap the
+                # piece node once the pointer goes down.
+                self._servo_gap_off = gap_css if piece_el is not None else None
                 return distance, confidence, f"cv:{det.method}"
         return 0.0, 0.0, "unresolved"
 
@@ -432,6 +433,22 @@ class AlibabaCloudChallengeDriver:
             return el is not None and el.bounding_box() is not None
         except Exception:
             return False
+
+    @staticmethod
+    def _first_box(frame: Frame, selectors: list[str]) -> dict | None:
+        """Fresh bounding box of the first rendered match — re-queries the
+        DOM every call so mid-drag node swaps don't go stale."""
+        for sel in selectors:
+            try:
+                el = frame.query_selector(sel)
+                if el is None:
+                    continue
+                box = el.bounding_box()
+            except Exception:
+                continue
+            if box:
+                return box
+        return None
 
     def _open_widget(self, page: Page, frame: Frame) -> None:
         """AliyunCaptcha v2 mounts a collapsed box; the puzzle panel only
@@ -533,45 +550,50 @@ class AlibabaCloudChallengeDriver:
             cursor = dx
             page.mouse.move(hx + dx, hy + dy)
             page.wait_for_timeout(dt)
-        servo = getattr(self, "_servo_target", None)
-        if servo is not None:
-            piece_el, bg_el, gap_off = servo
-            ibox = bg_el.bounding_box()
-            if ibox:
-                start_off = None
-                piece_moves = False
-                for i in range(45):
-                    pbox = piece_el.bounding_box()
-                    if not pbox:
-                        break
-                    off = pbox["x"] - ibox["x"]
-                    if start_off is None:
-                        start_off = off
-                    piece_moves = piece_moves or abs(off - start_off) > 0.5
-                    err = gap_off - off
-                    if abs(err) <= 1.5:
-                        break
-                    if i >= 3 and not piece_moves:
-                        # Non-elastic widget (e.g. fixture): the piece
-                        # doesn't track the pointer — finish the drag
-                        # open-loop to the resolved distance.
-                        for dx, dy, dt in slide:
-                            if dx <= cursor + 1:
-                                continue
-                            page.mouse.move(hx + dx, hy + dy)
-                            page.wait_for_timeout(dt)
-                        break
-                    cursor += max(2.0, min(16.0, err * 0.35))
-                    page.mouse.move(
-                        hx + cursor,
-                        hy + self.rng.uniform(-1.5, 1.5),
-                    )
-                    page.wait_for_timeout(self.rng.uniform(12, 30))
-                # Settle — the piece eases into place; confirm before release.
-                page.wait_for_timeout(self.rng.uniform(100, 200))
-        else:
+        servo_done = False
+        gap_off = getattr(self, "_servo_gap_off", None)
+        servo_err = None
+        piece_moves = False
+        if gap_off is not None:
+            start_off = None
+            for i in range(45):
+                # Fresh lookups every step — the piece node can be swapped
+                # or remounted once the drag starts.
+                pbox = self._first_box(frame, PIECE_IMAGE_SELECTORS)
+                ibox = self._first_box(frame, BG_IMAGE_SELECTORS)
+                if not pbox or not ibox:
+                    break
+                off = pbox["x"] - ibox["x"]
+                if start_off is None:
+                    start_off = off
+                piece_moves = piece_moves or abs(off - start_off) > 0.5
+                servo_err = gap_off - off
+                if abs(servo_err) <= 1.5:
+                    servo_done = True
+                    break
+                if i >= 3 and not piece_moves:
+                    # Non-elastic widget (e.g. fixture): the piece doesn't
+                    # track the pointer — finish open-loop to `distance`.
+                    break
+                cursor += max(2.0, min(16.0, servo_err * 0.35))
+                page.mouse.move(
+                    hx + cursor,
+                    hy + self.rng.uniform(-1.5, 1.5),
+                )
+                page.wait_for_timeout(self.rng.uniform(12, 30))
+            # Settle — the piece eases into place; confirm before release.
+            page.wait_for_timeout(self.rng.uniform(100, 200))
+            log.info(
+                "servo: %s err=%s moves=%s",
+                "converged" if servo_done else "incomplete",
+                f"{servo_err:.1f}px" if servo_err is not None else "n/a",
+                piece_moves,
+            )
+        if not servo_done:
+            # No servo target, unreadable elements, or a piece that never
+            # responded — finish the drag open-loop to the full distance.
             for dx, dy, dt in slide:
-                if dx <= rough:
+                if dx <= cursor + 1:
                     continue
                 page.mouse.move(hx + dx, hy + dy)
                 page.wait_for_timeout(dt)
