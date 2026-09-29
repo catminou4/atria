@@ -9,10 +9,14 @@ added later without touching the pipeline.
 from __future__ import annotations
 
 import imaplib
+import json
 import logging
 import os
 import re
+import secrets
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from email import message_from_bytes
 from email.message import Message
@@ -172,12 +176,111 @@ class ImapMailboxReader:
         raise VerificationTimeout(f"no message for {recipient} within {timeout_s}s")
 
 
+class TempMailReader:
+    """Disposable-mailbox reader over the public mail.tm API (free, no key).
+
+    Each run's recipient is a real account created on the service — the
+    provider's mail actually lands there, unlike a synthesized catch-all.
+    """
+
+    def __init__(self, api_base: str, template: str, local_domain: str):
+        self.api_base = api_base.rstrip("/")
+        self.template = template
+        self.local_domain = local_domain
+        self._tokens: dict[str, str] = {}
+
+    def _call(self, method: str, path: str, body=None, token: str = ""):
+        req = urllib.request.Request(
+            self.api_base + path,
+            method=method,
+            data=None if body is None else json.dumps(body).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                **({"Authorization": f"Bearer {token}"} if token else {}),
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+
+    @staticmethod
+    def _members(body) -> list:
+        # Accept:application/json returns a bare list; ld+json wraps it.
+        if isinstance(body, list):
+            return body
+        return body.get("hydra:member", [])
+
+    def _active_domain(self) -> str:
+        for d in self._members(self._call("GET", "/domains")):
+            if d.get("isActive"):
+                return d["domain"]
+        raise VerificationTimeout("mail.tm: no active domain")
+
+    def allocate_address(self, run_id: str) -> str:
+        # Reuse the configured template for the local part; the domain comes
+        # from the service, not our config.
+        local = self.template.format(run_id=run_id, catchall_domain="x").split("@")[0]
+        address = f"{local or f'svc-{run_id[:12]}'}@{self._active_domain()}"
+        password = secrets.token_urlsafe(18)
+        for attempt in range(5):
+            try:
+                self._call("POST", "/accounts", {"address": address, "password": password})
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code != 429 or attempt == 4:
+                    raise
+                time.sleep(8 * (attempt + 1))
+        token = self._call("POST", "/token", {"address": address, "password": password})
+        self._tokens[address] = token["token"]
+        return address
+
+    def _scan(self, recipient: str) -> VerificationMessage | None:
+        token = self._tokens.get(recipient)
+        if not token:
+            return None
+        listing = self._members(self._call("GET", "/messages", token=token))
+        for m in listing:
+            full = self._call("GET", f"/messages/{m['id']}", token=token)
+            html = "\n".join(full.get("html") or [])
+            text = "\n".join([
+                full.get("text") or "", html,
+                re.sub(r"<[^>]+>", " ", html), full.get("subject") or "",
+            ])
+            link, otp = _extract(text)
+            if link or otp:
+                return VerificationMessage(
+                    recipient=recipient, link=link, otp=otp,
+                    subject=full.get("subject", ""),
+                )
+        return None
+
+    def wait_for_message(
+        self, recipient: str, timeout_s: float, poll_s: float = 5.0
+    ) -> VerificationMessage:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                found = self._scan(recipient)
+                if found:
+                    return found
+            except Exception as exc:
+                log.warning("tempmail poll failed: %s", exc)
+            time.sleep(poll_s)
+        raise VerificationTimeout(f"no message for {recipient} within {timeout_s}s")
+
+
 def build_reader(cfg) -> MailboxReader:
     kind = cfg.get("mailbox.reader", "imap")
     template = cfg.get("mailbox.address_template", "svc-{run_id}@{catchall_domain}")
     domain = cfg.get("mailbox.catchall_domain", "example.com")
     if kind == "fixture":
         return FixtureMailboxReader(cfg.path("mailbox.fixture.outbox_dir", "outbox"), template, domain)
+    if kind == "tempmail":
+        return TempMailReader(
+            api_base=cfg.get("mailbox.tempmail.api_base", "https://api.mail.tm"),
+            template=template,
+            local_domain=domain,
+        )
     if kind == "imap":
         return ImapMailboxReader(
             host=cfg.get("mailbox.imap.host", ""),

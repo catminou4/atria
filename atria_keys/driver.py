@@ -73,10 +73,18 @@ class BrowserDriver:
             headless=headless,
             slow_mo=int(self.cfg.get("browser.slow_mo_ms", 0)),
             viewport={"width": 1280, "height": 800},
-            args=self.cfg.get("browser.args", []) or [],
+            args=[
+                # Otherwise navigator.webdriver stays true and the risk
+                # engine flags the session pre-slide.
+                "--disable-blink-features=AutomationControlled",
+                *(self.cfg.get("browser.args", []) or []),
+            ],
         )
         install_token_hook(self.context)
         self.context.on("response", self._capture_response)
+        self.context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
         self.page = self.context.new_page()
 
     def reset_context(self) -> None:

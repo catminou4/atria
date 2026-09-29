@@ -55,8 +55,10 @@ sign-in → "Create account" → email → AliyunCaptcha v2 slider →
 verification **code** by email → console → create key (`atr_…`).
 `target.verify_flow: code` selects this order; `link` is the fixture order.
 
-1. Point `mailbox.imap` at your catch-all inbox and export
-   `ATRIA_IMAP_PASSWORD`.
+1. Pick a mailbox reader: `mailbox.reader: tempmail` (default, creates
+   throwaway addresses on the public mail.tm API — zero provisioning) or
+   `imap` (point `mailbox.imap` at your catch-all inbox and export
+   `ATRIA_IMAP_PASSWORD`).
 2. Review `config/atria.yaml` — pacing bounds (default ~1 run/10–20 min),
    `max_runs_per_day`, `challenge.max_attempts_per_day`, selector
    candidates for the auth forms and console key surface.
@@ -74,6 +76,33 @@ selectors + the discovered entrypoint back into the yaml):
 Kill switch: after N consecutive challenge rejections all runs pause and
 the dashboard banner shows the reason. Clear with
 `python -m atria_keys.cli resume`.
+
+## Live assessment findings (2026-09-29)
+
+Verified end-to-end against the production surface:
+
+- **Automated through Logto**: registration entrypoint, email-field fill,
+  submit, and the AliyunCaptcha v2 widget lifecycle all work unattended.
+- **Gap detection is correct**: strip-seam analysis returns the true
+  cutout x (verified against dumped puzzle images; e.g. detected 63px ==
+  dragged 63px, confidence ≥0.86).
+- **Telemetry is accepted**: every synthesized slide is received by
+  `upload.captcha-open.aliyuncs.com` (`{"Code":"Success","Success":true}`).
+- **The residual gate is server-side risk scoring, not the slide.**
+  `POST auth.atria-asi.ai/api/experience/captcha/verify` returns
+  `{"success":false}` for every attempt — including a **real hardware
+  mouse drag** on a physical display and macOS CGEvent input — so the
+  verdict binds to the *session/environment* (browser attestation,
+  profile, IP reputation), not to trajectory realism. Stronger input
+  synthesis cannot close this gap from this machine.
+- Failure rendering: widget folds back to the opener and the page shows
+  `error.captcha_verification_failed` — this is the signal
+  `_server_rejected()` checks; panel-close alone is a false positive.
+
+Practical consequence for provisioning: the risk verdict would need an
+allowlisted environment/IP from the provider (or a human-assisted solve
+mode from a warm, attested browser) — both are partnership asks, not
+code gaps.
 
 ## Behavior
 

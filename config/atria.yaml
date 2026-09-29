@@ -42,7 +42,11 @@ target:
     - 'input[value^=atr_]'
     - code
 mailbox:
-  reader: imap
+  # tempmail = free disposable-mailbox API (no creds); imap needs a
+  # catch-all inbox + ATRIA_IMAP_PASSWORD.
+  reader: tempmail
+  tempmail:
+    api_base: https://api.mail.tm
   catchall_domain: example.com
   address_template: svc-{run_id}@{catchall_domain}
   imap:
@@ -58,7 +62,7 @@ mailbox:
 challenge:
   driver: alibaba
   max_attempts_per_run: 3
-  post_solve_wait_ms: 2500
+  post_solve_wait_ms: 4000
   max_attempts_per_day: 60
 browser:
   headless: false

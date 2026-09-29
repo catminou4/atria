@@ -290,6 +290,8 @@ class AlibabaCloudChallengeDriver:
         # Returns the freshest token the driver's network tap captured.
         self.captured_token_fn = captured_token_fn or (lambda: None)
         self.last_confidence: float | None = None
+        # Last puzzle capture, for artifact dumps on rejection.
+        self._last_puzzle: dict | None = None
 
     # -- detection --------------------------------------------------------
 
@@ -404,6 +406,10 @@ class AlibabaCloudChallengeDriver:
                     ibox = bg_el.bounding_box() or track.bounding_box()
                     if pbox and ibox:
                         distance = det.gap_x - (pbox["x"] - ibox["x"])
+                self._last_puzzle = {
+                    "bg": bg_bytes, "piece": piece_bytes or b"",
+                    "gap_x": det.gap_x, "distance": distance,
+                }
                 return distance, confidence, f"cv:{det.method}"
         return 0.0, 0.0, "unresolved"
 
@@ -448,6 +454,17 @@ class AlibabaCloudChallengeDriver:
         except Exception:
             return None
 
+    def _dump_puzzle(self, reason: str) -> None:
+        """Persist the last captured puzzle images for offline analysis."""
+        if not self._last_puzzle or not self._last_puzzle.get("bg"):
+            return
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        for name in ("bg", "piece"):
+            data = self._last_puzzle.get(name)
+            if data:
+                (self.artifacts_dir / f"challenge-{reason}-{name}-{ts}.png").write_bytes(data)
+
     def _reload_widget(self, page: Page) -> Frame:
         """A rejected attempt must reload the widget — never re-drag on a
         dead puzzle."""
@@ -484,14 +501,16 @@ class AlibabaCloudChallengeDriver:
             "slide distance %.0fpx (confidence %.2f, %s)", distance, confidence, method
         )
 
-        for x, y, dt in generate_approach_path((0, 0), (hx, hy), self.rng):
+        approach = generate_approach_path((0, 0), (hx, hy), self.rng)
+        slide = generate_slide_path(distance, self.rng)
+        for x, y, dt in approach:
             page.mouse.move(x, y)
             page.wait_for_timeout(dt)
         page.mouse.move(hx, hy)
         page.wait_for_timeout(self.rng.uniform(80, 220))
         page.mouse.down()
         page.wait_for_timeout(self.rng.uniform(120, 300))
-        for dx, dy, dt in generate_slide_path(distance, self.rng):
+        for dx, dy, dt in slide:
             page.mouse.move(hx + dx, hy + dy)
             page.wait_for_timeout(dt)
         page.wait_for_timeout(self.rng.uniform(80, 250))
@@ -530,6 +549,22 @@ class AlibabaCloudChallengeDriver:
             return True
         return False
 
+    _SERVER_REJECT_HINTS = (
+        "captcha_verification_failed",
+        "captcha verification failed",
+        "验证失败",
+    )
+
+    def _server_rejected(self, page: Page) -> bool:
+        """The widget panel can close while the site's own captcha/verify
+        call fails — Logto renders `error.captcha_verification_failed`.
+        Panel-close alone is NOT a pass."""
+        try:
+            txt = (page.inner_text("body") or "").lower()
+        except Exception:
+            return False
+        return any(h in txt for h in self._SERVER_REJECT_HINTS)
+
     def _attempt_succeeded(self, frame: Frame) -> bool:
         for sel in SUCCESS_SELECTORS:
             if frame.query_selector(sel):
@@ -560,6 +595,13 @@ class AlibabaCloudChallengeDriver:
                     raise
                 continue
             page.wait_for_timeout(self.post_solve_wait_ms)
+            if self._server_rejected(page):
+                # Logto folds the widget back to its opener — the next loop
+                # iteration re-opens a fresh puzzle. No in-place reload:
+                # the previous panel instance is dead.
+                log.warning("challenge attempt %d rejected by server", attempt)
+                self._dump_puzzle("server_rejected")
+                continue
             if self._attempt_succeeded(frame):
                 token = self._read_token(page, frame, timeout_ms=2000)
                 return ChallengeResult(
