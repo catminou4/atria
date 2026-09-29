@@ -42,9 +42,22 @@ target:
     - 'input[value^=atr_]'
     - code
 mailbox:
-  # tempmaillol = free disposable-mailbox API (no creds, fresher domains
-  # than mail.tm which Atria flags); imap needs a catch-all + password.
+  # !!! Atria's /captcha/verify returns success:false for disposable
+  # domains (tempmail.lol, mail.tm) even when the widget itself accepts
+  # the slide — verified live: the SAME solve passes with @gmail.com.
+  # For real runs use imap below: a single Gmail receives every
+  # user+tag@gmail.com alias, so one inbox covers all runs.
   reader: tempmaillol
+  # --- gmail catch-all (fill in + export ATRIA_IMAP_PASSWORD) --------
+  # reader: imap
+  # catchall_domain: gmail.com
+  # address_template: "YOURNAME+{run_id}@{catchall_domain}"
+  # imap:
+  #   host: imap.gmail.com
+  #   port: 993
+  #   username: YOURNAME@gmail.com
+  #   password_env: ATRIA_IMAP_PASSWORD   # Google app-password
+  #   folder: INBOX
   tempmail:
     api_base: https://api.mail.tm
   tempmaillol:
