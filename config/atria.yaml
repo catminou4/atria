@@ -1,0 +1,76 @@
+# Atria provisioning harness configuration.
+# Authorized-assessment use only. See README.md.
+
+target:
+  base_url: "https://api.atria-asi.ai"
+  register_path: "/register"
+  # Candidate selectors, tried in order. A config-exhausted lookup is a
+  # `dead_selector` fatal, not a retry.
+  selectors:
+    email_input:
+      - "input[type=email]"
+      - "input[name=email]"
+      - "#email"
+    submit:
+      - "button[type=submit]"
+      - "input[type=submit]"
+      - "button:has-text('Register')"
+      - "button:has-text('Sign up')"
+    api_key_holder:
+      - "[data-api-key]"
+      - "code.api-key"
+
+mailbox:
+  reader: imap            # imap | fixture
+  catchall_domain: "example.com"
+  address_template: "svc-{run_id}@{catchall_domain}"
+  imap:
+    host: "imap.example.com"
+    port: 993
+    username: "catchall@example.com"
+    password_env: "ATRIA_IMAP_PASSWORD"   # read from env, never stored here
+    folder: "INBOX"
+  fixture:
+    outbox_dir: "tests/fixtures/outbox"
+  poll_interval_s: 5
+  timeout_s: 180
+
+challenge:
+  driver: alibaba       # key into CHALLENGE_DRIVERS registry
+  max_attempts_per_run: 3
+  post_solve_wait_ms: 2500
+
+browser:
+  headless: true
+  slow_mo_ms: 0
+  session_dir: "keys/sessions"
+
+pacing:
+  min_interval_s: 600       # ~1 run / 10-20 min on the single exit IP
+  max_interval_s: 1200
+  jitter_s: 60
+  max_runs_per_day: 30
+  # Consecutive challenge failures escalate the pause multiplier, then halt.
+  challenge_backoff_s: 45
+  challenge_backoff_multipliers: [1, 2, 4, 8]
+  max_consecutive_challenge_failures: 4
+
+keystore:
+  path: "keys/keys.jsonl"
+  export_txt: "keys/keys.txt"
+  export_env: "keys/keys.env"
+
+dashboard:
+  host: "127.0.0.1"
+  port: 8686
+  refresh_s: 4
+
+state:
+  db_path: "keys/state.db"
+
+artifacts:
+  dir: "keys/artifacts"
+
+run:
+  stage_retries: 2          # transient retries per stage before fatal
+  retry_jitter_s: 5

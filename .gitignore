@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+keys/
+artifacts/
+tests/fixtures/outbox/
+.DS_Store

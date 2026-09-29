@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atria-keys"
+version = "0.1.0"
+description = "Service-account provisioning harness for authorized anti-bot resilience assessment of the Atria API platform (api.atria-asi.ai, Dawn preview tier)"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.44",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+atria-keys = "atria_keys.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["atria_keys*"]
