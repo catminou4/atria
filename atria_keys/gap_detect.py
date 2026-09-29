@@ -66,11 +66,11 @@ def detect_with_piece(bg_bytes: bytes, piece_bytes: bytes) -> GapDetection:
 
 
 def _is_strip(bg: np.ndarray, piece: np.ndarray) -> bool:
-    """AliyunCaptcha v2 'qst' variant: the piece is a full-height vertical
-    strip carved out of the background (hole then inpainted)."""
+    """Any full-height piece narrower than the background — strip widths
+    vary between widget variants (23px on 'qst', ~100px on chunkier
+    cutouts) and seam-continuity degrades gracefully on wide pieces."""
     return (
         piece.shape[0] >= bg.shape[0] * 0.8
-        and piece.shape[1] <= bg.shape[1] * 0.3
         and piece.shape[1] < bg.shape[1] - 8
     )
 

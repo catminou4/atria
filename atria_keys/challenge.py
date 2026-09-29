@@ -417,6 +417,10 @@ class AlibabaCloudChallengeDriver:
                     "bg": bg_bytes, "piece": piece_bytes or b"",
                     "gap_x": det.gap_x, "distance": distance,
                 }
+                # Closed-loop servo target: the piece element offset the
+                # widget must reach (elastic thumb->piece mapping means a
+                # blind drag of `distance` lands short — see probe).
+                self._servo_target = (piece_el, bg_el, gap_css) if piece_el else None
                 return distance, confidence, f"cv:{det.method}"
         return 0.0, 0.0, "unresolved"
 
@@ -517,9 +521,60 @@ class AlibabaCloudChallengeDriver:
         page.wait_for_timeout(self.rng.uniform(80, 220))
         page.mouse.down()
         page.wait_for_timeout(self.rng.uniform(120, 300))
+        # Open-loop phase: bezier path up to ~75% of the distance — cheap
+        # and looks human. Then the servo closes on the measured piece
+        # position (the widget's elastic mapping makes blind drags land
+        # consistently short).
+        cursor = 0.0
+        rough = distance * 0.75
         for dx, dy, dt in slide:
+            if dx > rough:
+                break
+            cursor = dx
             page.mouse.move(hx + dx, hy + dy)
             page.wait_for_timeout(dt)
+        servo = getattr(self, "_servo_target", None)
+        if servo is not None:
+            piece_el, bg_el, gap_off = servo
+            ibox = bg_el.bounding_box()
+            if ibox:
+                start_off = None
+                piece_moves = False
+                for i in range(45):
+                    pbox = piece_el.bounding_box()
+                    if not pbox:
+                        break
+                    off = pbox["x"] - ibox["x"]
+                    if start_off is None:
+                        start_off = off
+                    piece_moves = piece_moves or abs(off - start_off) > 0.5
+                    err = gap_off - off
+                    if abs(err) <= 1.5:
+                        break
+                    if i >= 3 and not piece_moves:
+                        # Non-elastic widget (e.g. fixture): the piece
+                        # doesn't track the pointer — finish the drag
+                        # open-loop to the resolved distance.
+                        for dx, dy, dt in slide:
+                            if dx <= cursor + 1:
+                                continue
+                            page.mouse.move(hx + dx, hy + dy)
+                            page.wait_for_timeout(dt)
+                        break
+                    cursor += max(2.0, min(16.0, err * 0.35))
+                    page.mouse.move(
+                        hx + cursor,
+                        hy + self.rng.uniform(-1.5, 1.5),
+                    )
+                    page.wait_for_timeout(self.rng.uniform(12, 30))
+                # Settle — the piece eases into place; confirm before release.
+                page.wait_for_timeout(self.rng.uniform(100, 200))
+        else:
+            for dx, dy, dt in slide:
+                if dx <= rough:
+                    continue
+                page.mouse.move(hx + dx, hy + dy)
+                page.wait_for_timeout(dt)
         page.wait_for_timeout(self.rng.uniform(80, 250))
         page.mouse.up()
         return distance, method
