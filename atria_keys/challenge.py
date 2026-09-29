@@ -36,6 +36,7 @@ from .gap_detect import (
     CONFIDENCE_ACCEPT,
     CONFIDENCE_TEMPLATE_ACCEPT,
     detect_gap_x,
+    image_is_blank,
     image_width,
 )
 
@@ -389,6 +390,11 @@ class AlibabaCloudChallengeDriver:
         bg_el = self._pick_opt(frame, BG_IMAGE_SELECTORS)
         if bg_el is not None:
             bg_bytes = self._image_bytes(page, bg_el)
+            if bg_bytes and image_is_blank(bg_bytes):
+                # Element captured before the CDN image painted — one
+                # re-capture beats an attempt burned on a phantom gap.
+                page.wait_for_timeout(450)
+                bg_bytes = self._image_bytes(page, bg_el)
             piece_el = self._pick_opt(frame, PIECE_IMAGE_SELECTORS)
             piece_bytes = self._image_bytes(page, piece_el) if piece_el else None
             if bg_bytes:
@@ -556,7 +562,7 @@ class AlibabaCloudChallengeDriver:
         piece_moves = False
         if gap_off is not None:
             start_off = None
-            for i in range(45):
+            for i in range(70):
                 # Fresh lookups every step — the piece node can be swapped
                 # or remounted once the drag starts.
                 pbox = self._first_box(frame, PIECE_IMAGE_SELECTORS)
@@ -575,7 +581,9 @@ class AlibabaCloudChallengeDriver:
                     # Non-elastic widget (e.g. fixture): the piece doesn't
                     # track the pointer — finish open-loop to `distance`.
                     break
-                cursor += max(2.0, min(16.0, servo_err * 0.35))
+                step = servo_err * 0.35
+                mag = max(2.0, min(16.0, abs(step)))
+                cursor += math.copysign(mag, step)
                 page.mouse.move(
                     hx + cursor,
                     hy + self.rng.uniform(-1.5, 1.5),

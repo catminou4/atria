@@ -32,6 +32,15 @@ class GapDetection:
     method: str
 
 
+def image_is_blank(img_bytes: bytes) -> bool:
+    """Unpainted element screenshots and failed fetches yield near-uniform
+    images — detection on them fabricates confident garbage, so callers
+    must refuse instead of trusting a gap found in noise."""
+    arr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+    return img is None or float(img.std()) < 20.0
+
+
 def image_width(img_bytes: bytes) -> int | None:
     arr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -140,6 +149,8 @@ def detect_gap_x(
     """Full fallback chain inside the image domain: strip-seam analysis
     for the full-height-strip variant, template match for small cutout
     pieces, else cutout-outline analysis."""
+    if image_is_blank(bg_bytes):
+        return GapDetection(0.0, 0.0, "unresolved")
     if piece_bytes:
         try:
             bg = _decode(bg_bytes)
