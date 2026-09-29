@@ -66,6 +66,9 @@ challenge:
   max_attempts_per_day: 60
 browser:
   headless: false
+  # Retail Google Chrome binary — the Playwright-bundled "Chrome for
+  # Testing" is itself an automation signal the risk engine reads.
+  channel: chrome
   slow_mo_ms: 0
   session_dir: keys/sessions
 session:

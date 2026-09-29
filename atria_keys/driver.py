@@ -68,9 +68,11 @@ class BrowserDriver:
     def _open_context(self) -> None:
         headless = bool(self.cfg.get("browser.headless", True))
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
+        channel = self.cfg.get("browser.channel")  # "chrome" = retail binary
         self.context = self._pw.chromium.launch_persistent_context(
             user_data_dir=str(self.user_data_dir),
             headless=headless,
+            channel=channel or None,
             slow_mo=int(self.cfg.get("browser.slow_mo_ms", 0)),
             viewport={"width": 1280, "height": 800},
             args=[

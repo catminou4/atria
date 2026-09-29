@@ -188,6 +188,16 @@ def cmd_dashboard(args) -> int:
     return 0
 
 
+def cmd_warmup(args) -> int:
+    cfg = Config.load(args.config)
+    from .warmup import warm
+
+    summary = warm(cfg, run_id=args.profile or "warm")
+    print(f"warm visit: {len(summary['pages'])} pages "
+          f"({sum(v['dwell_s'] for v in summary['pages']):.0f}s dwell)")
+    return 0
+
+
 def cmd_status(args) -> int:
     cfg = Config.load(args.config)
     state = StateStore(cfg.path("state.db_path", "keys/state.db"))
@@ -222,6 +232,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", default="config/atria.yaml")
     p = sub.add_parser("status")
     p.add_argument("--config", default="config/atria.yaml")
+    p = sub.add_parser("warmup",
+                       help="dwell on the site with the shared profile so the "
+                            "captcha session isn't cold")
+    p.add_argument("--config", default="config/atria.yaml")
+    p.add_argument("--profile", default="warm",
+                   help="profile dir name under browser.session_dir")
     p = sub.add_parser("calibrate",
                        help="headed live run: probe selectors, screenshot, write config back")
     p.add_argument("--config", default="config/atria.yaml")
@@ -232,7 +248,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     return {"run": cmd_run, "export": cmd_export,
             "dashboard": cmd_dashboard, "status": cmd_status,
-            "calibrate": cmd_calibrate, "resume": cmd_resume}[args.cmd](args)
+            "calibrate": cmd_calibrate, "resume": cmd_resume,
+            "warmup": cmd_warmup}[args.cmd](args)
 
 
 if __name__ == "__main__":
