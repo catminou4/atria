@@ -53,7 +53,10 @@ class BrowserDriver:
         self.context: BrowserContext | None = None
         self.page: Page | None = None
         self.user_data_dir = (
-            cfg.path("browser.session_dir", "keys/sessions") / run_id
+            # A stable profile lets device-trust state (cookies, history)
+            # accumulate across runs instead of every run starting cold.
+            cfg.path("browser.session_dir", "keys/sessions")
+            / (cfg.get("browser.profile") or run_id)
         )
         self.captured: list[dict] = []
         self._generation = 0

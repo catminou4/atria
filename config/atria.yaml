@@ -73,6 +73,9 @@ browser:
   channel: chrome
   slow_mo_ms: 0
   session_dir: keys/sessions
+  # Stable shared profile — the daily `warmup` ages this same dir so runs
+  # inherit accumulated device trust instead of starting cold each time.
+  profile: warm
 session:
   warm_dwell_s: 45
   warm_paths:
