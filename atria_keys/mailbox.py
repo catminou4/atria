@@ -16,6 +16,7 @@ import re
 import secrets
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from email import message_from_bytes
@@ -269,6 +270,89 @@ class TempMailReader:
         raise VerificationTimeout(f"no message for {recipient} within {timeout_s}s")
 
 
+class TempMailLolReader:
+    """Disposable-mailbox reader over the tempmail.lol v2 API (free, no key).
+
+    Rotates across less-flagged domains than mail.tm; each run gets a real
+    inbox created on the service. API: POST /v2/inbox/create →
+    {address, token}; GET /v2/inbox?token=… → {emails: [...], expired}.
+    """
+
+    def __init__(self, api_base: str, template: str, local_domain: str):
+        self.api_base = api_base.rstrip("/")
+        self.template = template
+        self.local_domain = local_domain
+        self._tokens: dict[str, str] = {}
+
+    def _call(self, method: str, path: str, body=None):
+        url = self.api_base + path
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(
+            url, method=method, data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                # urllib's default UA is CF-blocked with 403.
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+
+    def allocate_address(self, run_id: str) -> str:
+        local = self.template.format(run_id=run_id, catchall_domain="x").split("@")[0]
+        prefix = re.sub(r"[^a-zA-Z0-9]", "", (local or f"svc{run_id[:8]}").lower()) or "atria"
+        last_exc: Exception | None = None
+        for attempt in range(5):
+            try:
+                inbox = self._call("POST", "/v2/inbox/create", {"prefix": prefix})
+                address = inbox["address"]
+                self._tokens[address] = inbox["token"]
+                return address
+            except urllib.error.HTTPError as exc:
+                last_exc = exc
+                if exc.code != 429 or attempt == 4:
+                    raise
+                time.sleep(8 * (attempt + 1))
+        raise last_exc or VerificationTimeout("tempmail.lol: could not create inbox")
+
+    def _scan(self, recipient: str) -> VerificationMessage | None:
+        token = self._tokens.get(recipient)
+        if not token:
+            return None
+        body = self._call(
+            "GET", f"/v2/inbox?token={urllib.parse.quote(token)}"
+        )
+        for m in body.get("emails") or []:
+            html = m.get("html") or ""
+            text = "\n".join([
+                m.get("body") or "", html,
+                re.sub(r"<[^>]+>", " ", html), m.get("subject") or "",
+            ])
+            link, otp = _extract(text)
+            if link or otp:
+                return VerificationMessage(
+                    recipient=recipient, link=link, otp=otp,
+                    subject=m.get("subject", ""),
+                )
+        return None
+
+    def wait_for_message(
+        self, recipient: str, timeout_s: float, poll_s: float = 5.0
+    ) -> VerificationMessage:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                found = self._scan(recipient)
+                if found:
+                    return found
+            except Exception as exc:
+                log.warning("tempmail.lol poll failed: %s", exc)
+            time.sleep(poll_s)
+        raise VerificationTimeout(f"no message for {recipient} within {timeout_s}s")
+
+
 def build_reader(cfg) -> MailboxReader:
     kind = cfg.get("mailbox.reader", "imap")
     template = cfg.get("mailbox.address_template", "svc-{run_id}@{catchall_domain}")
@@ -278,6 +362,12 @@ def build_reader(cfg) -> MailboxReader:
     if kind == "tempmail":
         return TempMailReader(
             api_base=cfg.get("mailbox.tempmail.api_base", "https://api.mail.tm"),
+            template=template,
+            local_domain=domain,
+        )
+    if kind == "tempmaillol":
+        return TempMailLolReader(
+            api_base=cfg.get("mailbox.tempmaillol.api_base", "https://api.tempmail.lol"),
             template=template,
             local_domain=domain,
         )
