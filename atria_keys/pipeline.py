@@ -49,10 +49,14 @@ class Pipeline:
         self.stage_retries = int(cfg.get("run.stage_retries", 2))
         self.retry_jitter_s = float(cfg.get("run.retry_jitter_s", 5))
         self.artifacts_dir = cfg.path("artifacts.dir", "keys/artifacts")
+        self._driver = None
         self._challenge = CHALLENGE_DRIVERS[cfg.get("challenge.driver", "alibaba")](
             artifacts_dir=self.artifacts_dir,
             max_attempts=int(cfg.get("challenge.max_attempts_per_run", 3)),
             post_solve_wait_ms=int(cfg.get("challenge.post_solve_wait_ms", 2500)),
+            captured_token_fn=lambda: (
+                self._driver.captured_token() if self._driver else None
+            ),
         )
 
     # -- orchestration -----------------------------------------------------
@@ -60,11 +64,17 @@ class Pipeline:
     def orchestrate(self, count: int) -> list[str]:
         run_ids = []
         for _ in range(count):
+            paused = self.state.paused()
+            if paused:
+                log.error("kill switch engaged (%s) — halting orchestration", paused)
+                self.state.event(None, None, "orchestration_paused", paused)
+                break
             run_id = uuid.uuid4().hex[:12]
             try:
                 self.pacer.wait_for_slot(run_id)
             except PacingHalt as exc:
                 self.state.event(run_id, None, "pacing_halt", str(exc))
+                self.state.set_control("paused", str(exc))
                 log.error("pacing halt: %s", exc)
                 break
             self.state.new_run(run_id)
@@ -80,13 +90,21 @@ class Pipeline:
         try:
             driver = self.driver_factory(self.cfg, run_id)
             driver.__enter__()
+            self._driver = driver
             for stage in STAGES:
                 done = self.state.stage_payload(run_id, stage)
                 if done is not None:
                     ctx[stage] = done
                     continue
                 self.state.set_current_stage(run_id, stage)
+                t0 = time.monotonic()
                 ctx[stage] = self._with_retry(run_id, stage, ctx, driver)
+                duration = time.monotonic() - t0
+                ctx[stage]["duration_s"] = round(duration, 2)
+                self.state.event(
+                    run_id, stage, "stage_done",
+                    json.dumps({"duration_s": ctx[stage]["duration_s"]}),
+                )
                 self.state.complete_stage(run_id, stage, ctx[stage])
             self.state.finish_run(
                 run_id,
@@ -117,6 +135,13 @@ class Pipeline:
                     raise
                 wait = self.retry_jitter_s * (attempt + 1)
                 self.sleep(wait * random.uniform(0.5, 1.5))
+                if isinstance(exc, ChallengeRejected) and attempt >= 1:
+                    # Repeated rejections burn the session — continue the
+                    # retry on a fresh persistent context.
+                    driver.reset_context()
+                    verify_url = ctx.get("register", {}).get("verify_url")
+                    if verify_url:
+                        driver.goto(verify_url)
 
     # -- stages --------------------------------------------------------------
 
@@ -128,8 +153,16 @@ class Pipeline:
 
     def _stage_register(self, ctx, driver) -> dict:
         email = ctx["mailbox"]["email"]
+        # Warm the session before registration — a cold context that lands
+        # straight on the form is a risk-engine tell.
+        driver.warm_visit()
         driver.fill_registration(email)
         self.state.event(ctx["run_id"], "register", "form_submitted", email)
+        verify_flow = self.cfg.get("target.verify_flow", "link")
+        if verify_flow == "code":
+            # Logto order: submit -> captcha -> verification code by email.
+            # The mailbox wait runs in key_extract, after the challenge.
+            return {"verify_flow": "code", "email": email}
         msg = self.mailbox.wait_for_message(
             email,
             timeout_s=float(self.cfg.get("mailbox.timeout_s", 180)),
@@ -140,7 +173,8 @@ class Pipeline:
         driver.goto(msg.link)
         driver.save_session()
         self.state.event(ctx["run_id"], "register", "verified", msg.link)
-        return {"verify_url": msg.link, "email": email}
+        return {"verify_url": msg.link, "verify_flow": "link",
+                "email": email}
 
     def _stage_challenge(self, ctx, driver) -> dict:
         # A resumed run reloads the persisted session and lands back on the
@@ -148,16 +182,39 @@ class Pipeline:
         verify_url = ctx.get("register", {}).get("verify_url")
         if verify_url and "/verify" not in (driver.page.url or ""):
             driver.goto(verify_url)
+        max_day = int(self.cfg.get("challenge.max_attempts_per_day", 0) or 0)
+        if max_day and self.state.challenge_attempts_today() >= max_day:
+            self.state.set_control("paused", "challenge attempts/day ceiling")
+            raise PacingHalt("challenge attempts/day ceiling reached")
         try:
             result: ChallengeResult = self._challenge.solve(driver.page)
-        except ChallengeRejected:
-            wait = self.pacer.on_challenge_failure()
+        except ChallengeRejected as exc:
+            self.state.event(
+                ctx["run_id"], "challenge", "challenge_attempt",
+                json.dumps({"run_id": ctx["run_id"], "solved": False,
+                            "confidence": self._challenge.last_confidence}),
+            )
+            try:
+                wait = self.pacer.on_challenge_failure()
+            except PacingHalt as halt:
+                self.state.set_control("paused", str(halt))
+                raise
             self.state.event(
                 ctx["run_id"], "challenge", "challenge_rejected",
                 json.dumps({"cooldown": wait}),
             )
-            raise
+            raise exc
         self.pacer.on_challenge_success()
+        driver.save_session()
+        if result.token:
+            try:
+                info = driver.inject_token(result.token)
+                self.state.event(
+                    ctx["run_id"], "challenge", "token_injected",
+                    json.dumps(info),
+                )
+            except Exception as exc:
+                log.debug("token injection skipped: %s", exc)
         self.state.event(
             ctx["run_id"], "challenge", "challenge_solved",
             json.dumps(
@@ -166,12 +223,34 @@ class Pipeline:
                     "attempt": result.attempts,
                     "solved": True,
                     "first_pass": result.first_pass,
+                    "confidence": result.meta.get("confidence"),
+                    "distance_method": result.meta.get("distance_method"),
                 }
             ),
         )
-        return {"token": result.token, "attempts": result.attempts}
+        self.state.event(
+            ctx["run_id"], "challenge", "challenge_attempt",
+            json.dumps({"run_id": ctx["run_id"], "solved": True,
+                        "attempt": result.attempts,
+                        "confidence": result.meta.get("confidence")}),
+        )
+        return {"token": result.token, "attempts": result.attempts,
+                "confidence": result.meta.get("confidence")}
 
     def _stage_key_extract(self, ctx, driver) -> dict:
+        if ctx.get("register", {}).get("verify_flow") == "code":
+            # The code only goes out after the captcha was accepted, so the
+            # mailbox wait happens here — post-challenge, on the same page.
+            email = ctx["register"]["email"]
+            msg = self.mailbox.wait_for_message(
+                email,
+                timeout_s=float(self.cfg.get("mailbox.timeout_s", 180)),
+                poll_s=float(self.cfg.get("mailbox.poll_interval_s", 5)),
+            )
+            if not msg.otp:
+                raise TransientError("verification message carried no code")
+            driver.enter_verification_code(msg.otp)
+            self.state.event(ctx["run_id"], "key_extract", "verified", "code")
         api_key, key_id = driver.extract_api_key()
         self.state.event(ctx["run_id"], "key_extract", "key_seen", key_id)
         return {"api_key": api_key, "key_id": key_id}

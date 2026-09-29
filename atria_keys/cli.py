@@ -71,7 +71,9 @@ def _fixture_overrides(cfg: Config, server) -> Config:
         "max_consecutive_challenge_failures": 4,
     }
     raw.setdefault("challenge", {})["post_solve_wait_ms"] = 300
+    raw["challenge"]["max_attempts_per_day"] = 0  # uncapped in fixture mode
     raw["mailbox"]["timeout_s"] = 15
+    raw["session"] = {"warm_dwell_s": 0, "warm_paths": []}
     return Config.from_dict(raw, cfg.base_dir)
 
 
@@ -117,6 +119,7 @@ def cmd_run(args) -> int:
             cfg.get("dashboard.host", "127.0.0.1"),
             int(cfg.get("dashboard.port", 8686)),
             int(cfg.get("dashboard.refresh_s", 4)),
+            artifacts_dir=cfg.path("artifacts.dir", "keys/artifacts"),
         )
         log.info(
             "dashboard: http://%s:%d", cfg.get("dashboard.host"), cfg.get("dashboard.port")
@@ -144,6 +147,29 @@ def cmd_export(args) -> int:
     return 0
 
 
+def cmd_calibrate(args) -> int:
+    cfg = Config.load(args.config)
+    from .calibrate import calibrate
+
+    report = calibrate(cfg, config_path=None if args.no_write else args.config)
+    for stage in report["stages"]:
+        groups = stage.get("groups", {})
+        for group, probes in groups.items():
+            matched = [p["selector"] for p in probes if p.get("matched")]
+            log.info("%s/%s matched: %s", stage["stage"], group, matched or "none")
+    print(f"selector report: {report['report_path']}")
+    return 0
+
+
+def cmd_resume(args) -> int:
+    cfg = Config.load(args.config)
+    state = StateStore(cfg.path("state.db_path", "keys/state.db"))
+    reason = state.paused()
+    state.clear_pause()
+    print(f"cleared pause ({reason or 'none was set'})")
+    return 0
+
+
 def cmd_dashboard(args) -> int:
     cfg = Config.load(args.config)
     from .dashboard import serve
@@ -152,7 +178,8 @@ def cmd_dashboard(args) -> int:
     ks = KeyStore(cfg.path("keystore.path", "keys/keys.jsonl"))
     host = cfg.get("dashboard.host", "127.0.0.1")
     port = int(cfg.get("dashboard.port", 8686))
-    serve(state, ks, host, port, int(cfg.get("dashboard.refresh_s", 4)))
+    serve(state, ks, host, port, int(cfg.get("dashboard.refresh_s", 4)),
+          artifacts_dir=cfg.path("artifacts.dir", "keys/artifacts"))
     print(f"dashboard on http://{host}:{port} — Ctrl-C to stop")
     try:
         threading.Event().wait()
@@ -195,9 +222,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", default="config/atria.yaml")
     p = sub.add_parser("status")
     p.add_argument("--config", default="config/atria.yaml")
+    p = sub.add_parser("calibrate",
+                       help="headed live run: probe selectors, screenshot, write config back")
+    p.add_argument("--config", default="config/atria.yaml")
+    p.add_argument("--no-write", action="store_true",
+                   help="report only; don't update the yaml")
+    p = sub.add_parser("resume", help="clear the kill-switch pause flag")
+    p.add_argument("--config", default="config/atria.yaml")
     args = ap.parse_args(argv)
     return {"run": cmd_run, "export": cmd_export,
-            "dashboard": cmd_dashboard, "status": cmd_status}[args.cmd](args)
+            "dashboard": cmd_dashboard, "status": cmd_status,
+            "calibrate": cmd_calibrate, "resume": cmd_resume}[args.cmd](args)
 
 
 if __name__ == "__main__":

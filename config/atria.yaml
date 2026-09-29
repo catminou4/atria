@@ -1,76 +1,99 @@
-# Atria provisioning harness configuration.
-# Authorized-assessment use only. See README.md.
-
 target:
-  base_url: "https://api.atria-asi.ai"
-  register_path: "/register"
-  # Candidate selectors, tried in order. A config-exhausted lookup is a
-  # `dead_selector` fatal, not a retry.
+  base_url: https://api.atria-asi.ai
+  register_path: /register
+  # Live entry: the sign-in page hands out the Logto interaction session;
+  # the account form is one "Create account" click deeper.
+  registration_url: https://api.atria-asi.ai/sign-in
+  # Hosted-auth order: submit email -> captcha -> verification CODE by
+  # email (not a verify link) -> console -> create key.
+  verify_flow: code
+  console_path: /console
   selectors:
+    create_account_link:
+    - a[href*='register']
+    - 'text=Create account'
     email_input:
-      - "input[type=email]"
-      - "input[name=email]"
-      - "#email"
+    - input[name=identifier]
+    - input[type=email]
+    - input[name=email]
+    - '#email'
     submit:
-      - "button[type=submit]"
-      - "input[type=submit]"
-      - "button:has-text('Register')"
-      - "button:has-text('Sign up')"
+    - button[type=submit]
+    - input[type=submit]
+    - button:has-text('Create account')
+    - button:has-text('Register')
+    - button:has-text('Sign up')
+    code_input:
+    - input[name=code]
+    - input[name=verificationCode]
+    - input[name=verifyCode]
+    - input[inputmode=numeric]
+    code_submit:
+    - button[type=submit]
+    console_create_button:
+    - button:has-text('创建')
+    - button:has-text('新建')
+    - button:has-text('Create')
+    - button:has-text('New API Key')
+    - '[class*=create] button'
     api_key_holder:
-      - "[data-api-key]"
-      - "code.api-key"
-
+    - '[data-api-key]'
+    - code.api-key
+    - 'input[value^=atr_]'
+    - code
 mailbox:
-  reader: imap            # imap | fixture
-  catchall_domain: "example.com"
-  address_template: "svc-{run_id}@{catchall_domain}"
+  reader: imap
+  catchall_domain: example.com
+  address_template: svc-{run_id}@{catchall_domain}
   imap:
-    host: "imap.example.com"
+    host: imap.example.com
     port: 993
-    username: "catchall@example.com"
-    password_env: "ATRIA_IMAP_PASSWORD"   # read from env, never stored here
-    folder: "INBOX"
+    username: catchall@example.com
+    password_env: ATRIA_IMAP_PASSWORD
+    folder: INBOX
   fixture:
-    outbox_dir: "tests/fixtures/outbox"
+    outbox_dir: tests/fixtures/outbox
   poll_interval_s: 5
   timeout_s: 180
-
 challenge:
-  driver: alibaba       # key into CHALLENGE_DRIVERS registry
+  driver: alibaba
   max_attempts_per_run: 3
   post_solve_wait_ms: 2500
-
+  max_attempts_per_day: 60
 browser:
-  headless: true
+  headless: false
   slow_mo_ms: 0
-  session_dir: "keys/sessions"
-
+  session_dir: keys/sessions
+session:
+  warm_dwell_s: 45
+  warm_paths:
+  - /
+  - /docs
 pacing:
-  min_interval_s: 600       # ~1 run / 10-20 min on the single exit IP
+  min_interval_s: 600
   max_interval_s: 1200
   jitter_s: 60
   max_runs_per_day: 30
-  # Consecutive challenge failures escalate the pause multiplier, then halt.
   challenge_backoff_s: 45
-  challenge_backoff_multipliers: [1, 2, 4, 8]
+  challenge_backoff_multipliers:
+  - 1
+  - 2
+  - 4
+  - 8
   max_consecutive_challenge_failures: 4
-
 keystore:
-  path: "keys/keys.jsonl"
-  export_txt: "keys/keys.txt"
-  export_env: "keys/keys.env"
-
+  path: keys/keys.jsonl
+  export_txt: keys/keys.txt
+  export_env: keys/keys.env
 dashboard:
-  host: "127.0.0.1"
+  host: 127.0.0.1
   port: 8686
   refresh_s: 4
-
 state:
-  db_path: "keys/state.db"
-
+  db_path: keys/state.db
 artifacts:
-  dir: "keys/artifacts"
-
+  dir: keys/artifacts
 run:
-  stage_retries: 2          # transient retries per stage before fatal
+  stage_retries: 2
   retry_jitter_s: 5
+  page_settle_ms: 2000

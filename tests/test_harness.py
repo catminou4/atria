@@ -287,6 +287,112 @@ class HarnessTest(unittest.TestCase):
             httpd.shutdown()
 
     # ------------------------------------------------------------------
+    # Sprint 2 acceptance (AK-201 … AK-205)
+    # ------------------------------------------------------------------
+
+    def test_gap_detection_on_generated_puzzle(self):
+        from atria_keys.gap_detect import detect_cutout_only, detect_gap_x
+
+        for gap in (140, 190, 235):
+            bg, piece = fixture_server.render_puzzle(gap)
+            det = detect_gap_x(bg, piece)
+            self.assertAlmostEqual(det.gap_x, gap, delta=4)
+            self.assertGreaterEqual(det.confidence, 0.4)
+            det2 = detect_cutout_only(bg)
+            self.assertAlmostEqual(det2.gap_x, gap, delta=6)
+
+    def test_img_widget_end_to_end_uses_cv(self):
+        self.server.post("/__config", {"widget_mode": "img"})
+        pipe = make_pipeline(self.cfg)
+        run_id = uuid.uuid4().hex[:12]
+        pipe.state.new_run(run_id)
+        pipe.run(run_id)
+        run = pipe.state.get_run(run_id)
+        self.assertEqual(run["status"], "done", run.get("failure_reason"))
+        payload = pipe.state.stage_payload(run_id, "challenge")
+        self.assertGreaterEqual(payload["confidence"], 0.55)
+        self.assertEqual(
+            self.server.get_state()["counters"]["verify_challenge_ok"], 1)
+
+    def test_token_captured_via_xhr(self):
+        pipe = make_pipeline(self.cfg)
+        run_id = uuid.uuid4().hex[:12]
+        pipe.state.new_run(run_id)
+        pipe.run(run_id)
+        self.assertEqual(pipe.state.get_run(run_id)["status"], "done")
+        captured = pipe._driver.captured
+        self.assertTrue(
+            any("/api/challenge-token" in e["url"] for e in captured))
+        self.assertIn(pipe._driver.captured_token(), self.server._tokens)
+
+    def test_retry_reloads_widget_fresh_puzzle(self):
+        self.server.post("/__config", {"flaky_rejects": 1, "widget_mode": "img"})
+        pipe = make_pipeline(self.cfg)
+        run_id = uuid.uuid4().hex[:12]
+        pipe.state.new_run(run_id)
+        pipe.run(run_id)
+        run = pipe.state.get_run(run_id)
+        self.assertEqual(run["status"], "done", run.get("failure_reason"))
+        loads = self.server.get_state()["widget_loads"]
+        self.assertGreaterEqual(max(loads.values()), 2)
+
+    def test_persistent_context_dir_populated(self):
+        pipe = make_pipeline(self.cfg)
+        run_id = uuid.uuid4().hex[:12]
+        pipe.state.new_run(run_id)
+        pipe.run(run_id)
+        session_dir = self.tmp / "sessions" / run_id
+        self.assertTrue(session_dir.is_dir())
+        self.assertTrue(any(session_dir.iterdir()))
+
+    def test_calibrate_report_shape(self):
+        from atria_keys.calibrate import calibrate
+
+        cfg = fixture_config(self.server, self.tmp)
+        report = calibrate(cfg, config_path=None, headless=True)
+        stages = {s["stage"]: s for s in report["stages"]}
+        self.assertIn("register", stages)
+        self.assertIn("challenge_widget", stages)
+        self.assertIn("key_extract", stages)
+        email = stages["register"]["groups"]["email_input"]
+        self.assertTrue(email[0]["matched"])
+        self.assertTrue(Path(report["report_path"]).is_file())
+
+    def test_kill_switch_pauses_orchestration(self):
+        pipe = make_pipeline(self.cfg)
+        pipe.state.set_control("paused", "test halt")
+        ids = pipe.orchestrate(3)
+        self.assertEqual(ids, [])
+        self.assertEqual(
+            self.server.get_state()["counters"]["register_calls"], 0)
+        self.assertIsNotNone(pipe.state.paused())
+
+    def test_daily_challenge_ceiling(self):
+        cfg = fixture_config(self.server, self.tmp)
+        cfg._raw["challenge"]["max_attempts_per_day"] = 1
+        pipe = make_pipeline(cfg)
+        pipe.state.event("r0", "challenge", "challenge_attempt",
+                         json.dumps({"solved": True}))
+        run_id = uuid.uuid4().hex[:12]
+        pipe.state.new_run(run_id)
+        pipe.run(run_id)
+        run = pipe.state.get_run(run_id)
+        self.assertEqual(run["status"], "failed")
+        self.assertIsNotNone(pipe.state.paused())
+
+    def test_snapshot_redaction(self):
+        from atria_keys.challenge import redact_snapshot
+
+        markup = ('<input name="email" value="victim@x.io">'
+                  '<div data-api-key="ak_live_abcdef123456">'
+                  'mail me at owner@corp.io</div>')
+        out = redact_snapshot(markup)
+        self.assertNotIn("victim@x.io", out)
+        self.assertNotIn("owner@corp.io", out)
+        self.assertNotIn("ak_live_abcdef123456", out)
+        self.assertNotIn('value="victim', out)
+
+    # ------------------------------------------------------------------
     # CLI acceptance: `run --count 2 --fixture`
     # ------------------------------------------------------------------
 

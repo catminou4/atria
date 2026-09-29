@@ -18,11 +18,12 @@ atria_keys/
   mailbox.py    MailboxReader protocol; FixtureMailboxReader + ImapMailboxReader
   driver.py     Playwright driver: form fill, session persistence, key extract
   challenge.py  ChallengeDriver protocol + AlibabaCloudChallengeDriver
+  gap_detect.py OpenCV gap detection (cutout / template / strip-seam)
+  calibrate.py  live headed calibration: selector probes + config write-back
   keystore.py   atomic JSONL append, dedupe by key hash, exports, masking
   dashboard.py  read-only ops page on localhost:8686
-  pacing.py     single-lane rate limiter + challenge-failure backoff
-  state.py      SQLite checkpoints / events
-  errors.py     transient / fatal taxonomy
+  pacing.py     single-lane rate limiter + challenge-failure backoff + kill switch
+  state.py      SQLite checkpoints / events / control flags
 tests/
   fixtures/server.py  local stand-in for the registration surface + widget
   run_all.py          acceptance suite
@@ -49,13 +50,30 @@ outbox for verification links — the same code paths as the live run.
 
 ## Live runs
 
+The real surface is hosted-auth (Logto) on `auth.atria-asi.ai`:
+sign-in → "Create account" → email → AliyunCaptcha v2 slider →
+verification **code** by email → console → create key (`atr_…`).
+`target.verify_flow: code` selects this order; `link` is the fixture order.
+
 1. Point `mailbox.imap` at your catch-all inbox and export
    `ATRIA_IMAP_PASSWORD`.
 2. Review `config/atria.yaml` — pacing bounds (default ~1 run/10–20 min),
-   `max_runs_per_day`, selector candidates for the registration form and
-   key surface (first live run will likely need selector tuning; a dead
-   selector is a `fatal` classification, not a retry).
+   `max_runs_per_day`, `challenge.max_attempts_per_day`, selector
+   candidates for the auth forms and console key surface.
 3. `python -m atria_keys.cli run --count 5`
+
+Calibration (headed, no registration completes — probes every configured
+selector against the live surface, screenshots each stage, writes matched
+selectors + the discovered entrypoint back into the yaml):
+
+```bash
+.venv/bin/python -m atria_keys.cli calibrate            # writes config
+.venv/bin/python -m atria_keys.cli calibrate --no-write # report only
+```
+
+Kill switch: after N consecutive challenge rejections all runs pause and
+the dashboard banner shows the reason. Clear with
+`python -m atria_keys.cli resume`.
 
 ## Behavior
 
@@ -64,9 +82,24 @@ outbox for verification links — the same code paths as the live run.
 - **Failures**: `transient` (retry with jitter), `fatal` (dead selector,
   unrecoverable rejection). Consecutive challenge failures escalate a
   cooldown, then a circuit-breaker halt — never hammering.
+- **Challenge lane**: the gap position is read off the puzzle image with
+  OpenCV — template match for small-cutout pieces, seam-boundary analysis
+  for the AliyunCaptcha v2 full-height strip, cutout-outline edges as
+  fallback — with a `distance_confidence` score; low confidence reloads
+  the widget rather than guessing. Rejected attempts always get a fresh
+  puzzle; N consecutive rejections → cooldown + fresh persistent context.
+- **Session hygiene**: `launch_persistent_context` per run, headed-capable
+  launch, a short warm site visit before registration, default Playwright
+  fingerprint left intact.
+- **Token capture**: XHR/fetch interception on `nc_`/`captcha`/verify/
+  interaction endpoints plus the DOM hook — captured token is injected
+  into a form field or header; "solved-by-navigation" counts when the
+  flow advances without a readable token.
 - **Unsupported widget**: if the widget layout changes, the run emits
-  `unsupported_challenge_variant` plus a DOM snapshot under
+  `unsupported_challenge_variant` plus a redacted DOM snapshot under
   `keys/artifacts/` and stops — no blind retries.
+- **Redaction**: API keys, emails, and `<input value>` are stripped from
+  every snapshot/artifact before persist; keys are masked in all logs.
 - **Keys**: appended atomically to `keys/keys.jsonl` (fsync per line),
   deduped on key hash, masked in every log line. `cli export` writes
   `keys.txt` / `keys.env`.
@@ -77,6 +110,9 @@ outbox for verification links — the same code paths as the live run.
 .venv/bin/python tests/run_all.py
 ```
 
-Covers: pipeline stages on the fixture site, keystore atomicity under
-concurrent appends, dedupe on re-run, checkpoint resume mid-flow, pacing
-enforcement, and the unsupported-variant artifact path.
+Covers: pipeline stages on the fixture site, image-gap detection on
+generated puzzles (no `data-gap`), XHR token capture, widget reload on
+rejection, persistent-context usage, keystore atomicity under concurrent
+appends, dedupe on re-run, checkpoint resume mid-flow, pacing + kill
+switch + daily ceiling, snapshot redaction, calibration report shape, and
+the unsupported-variant artifact path.

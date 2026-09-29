@@ -1,43 +1,48 @@
 """Native in-process driver for the embedded risk-control widget.
 
 ChallengeDriver protocol + AlibabaCloudChallengeDriver implementation for
-the slider variant: locate the widget iframe, resolve the slide distance,
-drag the handle over a human-plausible pointer trajectory (bezier easing,
-non-constant velocity, overshoot + correction), then submit via the
-widget's own JS contract — the token the widget itself emits to the host
-page. No external solver calls; all computation on-device. Canvas /
-fingerprint noise is left intact: we do not patch fingerprints.
+the NC slider variant: locate the widget iframe, resolve the slide
+distance (widget attr → puzzle-image CV → refuse), drag the handle over a
+human-plausible pointer trajectory (bezier easing, non-constant velocity,
+overshoot + correction), and read the token the widget emits through its
+own JS contract. No external solver calls; all computation on-device.
+Canvas/fingerprint noise is left intact.
 
 Unknown widget layouts are never blind-retried: they emit
-UnsupportedChallengeVariant with a DOM snapshot artifact.
+UnsupportedChallengeVariant with a redacted DOM snapshot artifact.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import math
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from playwright.sync_api import Frame, Page
-from playwright.sync_api import TimeoutError as PWTimeout
 
 from .errors import (
-    ChallengeExhausted,
     ChallengeRejected,
     DeadSelectorError,
     UnsupportedChallengeVariant,
 )
+from .gap_detect import (
+    CONFIDENCE_ACCEPT,
+    CONFIDENCE_TEMPLATE_ACCEPT,
+    detect_gap_x,
+)
 
 log = logging.getLogger("atria_keys.challenge")
 
-# Signatures seen on Alibaba Cloud risk-control sliders (nc / aliyun
-# containers, captcha/slide iframes). The fixture widget carries the same
-# signature class so tests exercise the real detection path.
+# Signatures seen on Alibaba Cloud NC sliders (nc/aliyun containers,
+# captcha/slide iframes). The fixture widget carries the same signature
+# class so tests exercise the real detection path.
 WIDGET_SIGNATURES = [
     "iframe[src*='aliyun']",
     "iframe[src*='captcha']",
@@ -50,20 +55,42 @@ WIDGET_SIGNATURES = [
     "[class*='nc-container']",
     "#nc_wrapper",
     ".nc_scale",
+    "#aliyunCaptcha-captcha-wrapper",
+    "#aliyunCaptcha-window-float",
+    "#aliyun-captcha-widget",
 ]
+
+# AliyunCaptcha v2 renders a collapsed box first — clicking it opens the
+# sliding panel (`#aliyunCaptcha-window-float`). The element stays present
+# after the panel opens, so an absent slider handle means "not opened yet".
+OPENER_SELECTORS = [
+    "#aliyunCaptcha-captcha-text-box",
+    "#aliyunCaptcha-start-icon",
+    "#aliyunCaptcha-captcha-body",
+    ".aliyunCaptcha-captcha-text-box",
+    ".aliyunCaptcha-start-icon",
+    "[data-role='captcha-opener']",
+]
+
+# Panel visibility marks a live puzzle window.
+PANEL_SELECTOR = "#aliyunCaptcha-window-float"
 
 HANDLE_SELECTORS = [
     "[data-role='handle']",
+    "#aliyunCaptcha-sliding-slider",
     ".nc_iconfont.btn_slide",
     "#nc_1_n1t",
     "[id*='nc_'][id*='n1t']",
     ".btn_slide",
     ".slider-btn",
     ".slider-handle",
+    ".slider-move",
 ]
 
 TRACK_SELECTORS = [
     "[data-role='track']",
+    "#aliyunCaptcha-sliding-body",
+    "#aliyunCaptcha-sliding-text-box",
     "#nc_1_n1z",
     "[id*='nc_'][id*='n1z']",
     ".nc_scale",
@@ -71,11 +98,42 @@ TRACK_SELECTORS = [
     ".track",
 ]
 
+# Puzzle imagery: the gap position lives in these, not in the track DOM.
+BG_IMAGE_SELECTORS = [
+    "[data-role='puzzle-bg']",
+    "#aliyunCaptcha-img",
+    "#aliyunCaptcha-img-box img",
+    "img[class*='puzzle'][class*='bg']",
+    "img.puzzle-bg",
+    "img.yunhuni",
+    ".nc_scale canvas",
+    "img[src*='puzzle']",
+    "canvas",
+]
+PIECE_IMAGE_SELECTORS = [
+    "[data-role='puzzle-piece']",
+    "#aliyunCaptcha-puzzle",
+    "img[class*='piece']",
+    "img.puzzle-piece",
+    ".nc_puzzle img",
+    "img[src*='piece']",
+]
+
+REFRESH_SELECTORS = [
+    "[data-role='refresh']",
+    "#aliyunCaptcha-btn-refresh",
+    ".nc_refresh",
+    ".yidun_refresh",
+    "[class*='refresh']",
+]
+
 SUCCESS_SELECTORS = [
     "[data-state='solved']",
     ".nc-lang-cnt .btn_ok",
     ".nc_iconfont.btn_ok",
     ".slider-success",
+    "#aliyunCaptcha-certifyId[value]",
+    ".aliyunCaptcha-success",
     "[class*='success']",
 ]
 
@@ -83,12 +141,12 @@ FAIL_SELECTORS = [
     "[data-state='failed']",
     ".nc_iconfont.btn_close",
     ".errloading",
+    ".aliyunCaptcha-fail",
     "[class*='fail']",
 ]
 
-# Init script: capture whatever token the widget hands to the host page,
-# across the contract shapes in the wild (postMessage payloads, global
-# callbacks, window variables).
+# Init script: capture whatever token the widget hands the host page.
+# Listens only — does not touch canvas, WebGL, or navigator fingerprints.
 _TOKEN_HOOK_JS = """
 (() => {
   window.__atriaChallenge = window.__atriaChallenge || { token: null, events: [] };
@@ -114,6 +172,19 @@ _TOKEN_HOOK_JS = """
   ['nc_callback', 'onChallengeSolved', '__nc_cb', 'challengeCallback'].forEach(wrap);
 })();
 """
+
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+_KEYLIKE_RE = re.compile(r"\b(ak|key|sk|tk)[-_][A-Za-z0-9_\-]{8,}\b")
+_INPUT_VALUE_RE = re.compile(r'(<input[^>]*\svalue=")[^"]*(")', re.IGNORECASE)
+
+
+def redact_snapshot(html: str) -> str:
+    """Strip emails, key-like material and input values from a DOM
+    snapshot before it hits the artifact store."""
+    html = _EMAIL_RE.sub("***@***", html)
+    html = _KEYLIKE_RE.sub(r"\1_********", html)
+    html = _INPUT_VALUE_RE.sub(r"\1***\2", html)
+    return html
 
 
 @dataclass
@@ -149,13 +220,9 @@ def _ease_in_out(t: float) -> float:
 def generate_slide_path(
     distance: float, rng: random.Random
 ) -> list[tuple[float, float, float]]:
-    """Return [(x, y, dt_ms)] samples along a slide of `distance` px.
-
-    Position follows an ease-out bezier (fast start, decelerating arrival),
-    overshoots the target by 2-6% and corrects back, and carries sinusoidal
-    vertical jitter so the trace is never a straight line. Sampling times
-    are jittered with occasional micro-pauses — velocity is never constant.
-    """
+    """[(x, y, dt_ms)] along a slide of `distance` px — ease-out bezier,
+    2-6% overshoot + correction, sinusoidal vertical jitter, jittered
+    sample times with occasional micro-pauses."""
     overshoot = distance * rng.uniform(0.02, 0.06)
     n = max(26, min(80, int(distance / 7)))
     split = int(n * rng.uniform(0.78, 0.86))
@@ -176,18 +243,14 @@ def generate_slide_path(
         dt = max(6.0, min(45.0, rng.gauss(14, 5)))
         pts.append((x, y, dt))
         if rng.random() < 0.03:
-            pts.append((x, y, rng.uniform(60, 140)))  # micro-pause, same spot
-    # Land exactly on target with release-level y.
+            pts.append((x, y, rng.uniform(60, 140)))
     pts.append((distance, rng.uniform(-1.0, 1.0), rng.uniform(8, 20)))
     return pts
 
 
 def generate_approach_path(
-    from_xy: tuple[float, float],
-    to_xy: tuple[float, float],
-    rng: random.Random,
+    from_xy: tuple[float, float], to_xy: tuple[float, float], rng: random.Random
 ) -> list[tuple[float, float, float]]:
-    """Short hover path from current pointer position to the handle."""
     x0, y0 = from_xy
     x1, y1 = to_xy
     dist = math.hypot(x1 - x0, y1 - y0)
@@ -218,32 +281,38 @@ class AlibabaCloudChallengeDriver:
         max_attempts: int = 3,
         post_solve_wait_ms: int = 2500,
         seed: int | None = None,
+        captured_token_fn=None,
     ):
         self.artifacts_dir = Path(artifacts_dir)
         self.max_attempts = max_attempts
         self.post_solve_wait_ms = post_solve_wait_ms
         self.rng = random.Random(seed)
+        # Returns the freshest token the driver's network tap captured.
+        self.captured_token_fn = captured_token_fn or (lambda: None)
+        self.last_confidence: float | None = None
 
-    # -- detection ------------------------------------------------------
+    # -- detection --------------------------------------------------------
 
     def _find_widget_frame(self, page: Page) -> Frame:
         for sel in WIDGET_SIGNATURES:
             el = page.query_selector(sel)
             if el is None:
                 continue
-            frame = el.content_frame() if el.evaluate("e => e.tagName") == "IFRAME" else None
-            if frame is not None:
-                return frame
-            # Signature matched a non-iframe container: the widget lives on
-            # the host page itself.
-            return page.main_frame
-        self._snapshot(page, "no_known_widget_signature")
+            try:
+                is_iframe = el.evaluate("e => e.tagName === 'IFRAME'")
+            except Exception:
+                is_iframe = False
+            if is_iframe:
+                frame = el.content_frame()
+                if frame is not None:
+                    return frame
+            else:
+                return page.main_frame
+        artifact = self._snapshot(page, "no_known_widget_signature")
         raise UnsupportedChallengeVariant(
             "no known challenge-widget signature found",
-            artifact_path=str(self._last_artifact),
+            artifact_path=str(artifact),
         )
-
-    _last_artifact: Path | None = None
 
     def _snapshot(self, page: Page, reason: str) -> Path:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -254,10 +323,10 @@ class AlibabaCloudChallengeDriver:
         except Exception:
             content = "<unavailable: page.content() failed>"
         path.write_text(
-            f"<!-- url={page.url} reason={reason} -->\n{content}", encoding="utf-8"
+            f"<!-- url={page.url} reason={reason} -->\n" + redact_snapshot(content),
+            encoding="utf-8",
         )
-        self._last_artifact = path
-        log.error("unsupported challenge variant; DOM snapshot at %s", path)
+        log.error("unsupported challenge variant; redacted snapshot at %s", path)
         return path
 
     def _pick(self, frame: Frame, selectors: list[str], what: str):
@@ -267,28 +336,153 @@ class AlibabaCloudChallengeDriver:
                 return el
         raise DeadSelectorError(f"{what}: no selector matched {selectors}")
 
-    # -- solving ----------------------------------------------------------
+    def _pick_opt(self, frame: Frame, selectors: list[str]):
+        for sel in selectors:
+            el = frame.query_selector(sel)
+            if el is not None:
+                return el
+        return None
 
-    def _resolve_distance(self, frame: Frame, track) -> float:
-        box = track.bounding_box()
-        if box is None:
-            raise DeadSelectorError("track has no bounding box")
-        # Widgets that expose the gap programmatically (our fixture mirrors
-        # this); otherwise the slide target is the usable track width minus
-        # the handle's own width.
+    # -- distance resolution (AK-201) --------------------------------------
+
+    def _image_bytes(self, page: Page, el) -> bytes | None:
+        """Element pixels: canvas via toDataURL, raw img src (direct fetch
+        through the page's request context so cookies apply), element
+        screenshot as last resort."""
+        try:
+            data_url = el.evaluate(
+                "(e) => e.tagName === 'CANVAS' ? e.toDataURL('image/png') : null"
+            )
+            if data_url and data_url.startswith("data:image"):
+                return base64.b64decode(data_url.split(",", 1)[1])
+        except Exception:
+            pass
+        try:
+            # Raw src first — an element screenshot of the background img
+            # would capture the piece element composited on top of it.
+            # e.src resolves relative URLs against the element's own frame.
+            src = el.evaluate("(e) => e.src || null") or el.get_attribute("src")
+            if src:
+                if src.startswith("data:image"):
+                    return base64.b64decode(src.split(",", 1)[1])
+                resp = page.context.request.get(src)
+                if resp.ok:
+                    return resp.body()
+        except Exception:
+            pass
+        try:
+            return el.screenshot()
+        except Exception:
+            pass
+        return None
+
+    def resolve_distance(self, page: Page, frame: Frame, track) -> tuple[float, float, str]:
+        """Fallback chain — widget attr, puzzle-image CV, refuse.
+        Returns (distance_px, confidence, method); never guesses."""
         gap = track.get_attribute("data-gap")
         if gap:
-            return float(gap)
-        return box["width"] * 0.98
+            return float(gap), 1.0, "attr"
 
-    def _drag(self, page: Page, frame: Frame, handle, track) -> None:
+        bg_el = self._pick_opt(frame, BG_IMAGE_SELECTORS)
+        if bg_el is not None:
+            bg_bytes = self._image_bytes(page, bg_el)
+            piece_el = self._pick_opt(frame, PIECE_IMAGE_SELECTORS)
+            piece_bytes = self._image_bytes(page, piece_el) if piece_el else None
+            if bg_bytes:
+                det = detect_gap_x(bg_bytes, piece_bytes)
+                confidence = det.confidence
+                # A template hit above its own accept bar is a real match —
+                # CCOEFF on edge maps saturates well below 1.0.
+                if det.method in ("template", "strip") and confidence >= CONFIDENCE_TEMPLATE_ACCEPT:
+                    confidence = 0.7 + confidence * 0.3
+                # Piece element's current x → distance = gap - piece_x.
+                # Origin is the background image box (on v2 widgets the
+                # slider bar sits below the puzzle and offsets differ).
+                distance = det.gap_x
+                if piece_el is not None:
+                    pbox = piece_el.bounding_box()
+                    ibox = bg_el.bounding_box() or track.bounding_box()
+                    if pbox and ibox:
+                        distance = det.gap_x - (pbox["x"] - ibox["x"])
+                return distance, confidence, f"cv:{det.method}"
+        return 0.0, 0.0, "unresolved"
+
+    # -- widget lifecycle ----------------------------------------------------
+
+    @staticmethod
+    def _rendered(el) -> bool:
+        try:
+            return el is not None and el.bounding_box() is not None
+        except Exception:
+            return False
+
+    def _open_widget(self, page: Page, frame: Frame) -> None:
+        """AliyunCaptcha v2 mounts a collapsed box; the puzzle panel only
+        exists after the opener is clicked."""
+        for sel in OPENER_SELECTORS:
+            opener = frame.query_selector(sel)
+            if opener is None:
+                continue
+            try:
+                opener.click()
+            except Exception:
+                continue
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                if self._rendered(self._pick_opt(frame, HANDLE_SELECTORS)):
+                    return
+                page.wait_for_timeout(150)
+        raise DeadSelectorError(
+            "captcha opener clicked but no slider handle appeared"
+        )
+
+    def _panel_open(self, frame: Frame) -> bool | None:
+        """v2 verdict source: panel visible => puzzle still unsolved; gone =>
+        the widget closed (success) or was never open. None => not a v2
+        widget, use the selector verdicts instead."""
+        el = frame.query_selector(PANEL_SELECTOR)
+        if el is None:
+            return None
+        try:
+            return el.is_visible()
+        except Exception:
+            return None
+
+    def _reload_widget(self, page: Page) -> Frame:
+        """A rejected attempt must reload the widget — never re-drag on a
+        dead puzzle."""
+        frame0 = None
+        try:
+            frame0 = self._find_widget_frame(page)
+            refresh = self._pick_opt(frame0, REFRESH_SELECTORS)
+        except UnsupportedChallengeVariant:
+            refresh = None
+        if refresh is not None:
+            try:
+                refresh.click()
+                page.wait_for_timeout(1200)
+                return self._find_widget_frame(page)
+            except Exception:
+                pass
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_timeout(800)
+        return self._find_widget_frame(page)
+
+    def _drag(self, page: Page, frame: Frame, handle, track) -> tuple[float, str]:
         hbox = handle.bounding_box()
-        tbox = track.bounding_box()
-        if not hbox or not tbox:
-            raise DeadSelectorError("handle/track bounding box unavailable")
+        if not hbox:
+            raise DeadSelectorError("handle has no bounding box")
         hx = hbox["x"] + hbox["width"] / 2
         hy = hbox["y"] + hbox["height"] / 2
-        distance = self._resolve_distance(frame, track)
+        distance, confidence, method = self.resolve_distance(page, frame, track)
+        self.last_confidence = confidence
+        if confidence < CONFIDENCE_ACCEPT or distance <= 0:
+            raise ChallengeRejected(
+                f"gap unresolved/low-confidence ({confidence:.2f}, {method})"
+            )
+        log.info(
+            "slide distance %.0fpx (confidence %.2f, %s)", distance, confidence, method
+        )
 
         for x, y, dt in generate_approach_path((0, 0), (hx, hy), self.rng):
             page.mouse.move(x, y)
@@ -297,18 +491,19 @@ class AlibabaCloudChallengeDriver:
         page.wait_for_timeout(self.rng.uniform(80, 220))
         page.mouse.down()
         page.wait_for_timeout(self.rng.uniform(120, 300))
-
         for dx, dy, dt in generate_slide_path(distance, self.rng):
             page.mouse.move(hx + dx, hy + dy)
             page.wait_for_timeout(dt)
-
         page.wait_for_timeout(self.rng.uniform(80, 250))
         page.mouse.up()
+        return distance, method
 
     def _read_token(self, page: Page, frame: Frame, timeout_ms: int) -> str | None:
         deadline = time.monotonic() + timeout_ms / 1000.0
         while time.monotonic() < deadline:
-            tok = page.evaluate("() => window.__atriaChallenge && window.__atriaChallenge.token")
+            tok = page.evaluate(
+                "() => window.__atriaChallenge && window.__atriaChallenge.token"
+            )
             if tok:
                 return tok
             try:
@@ -319,6 +514,9 @@ class AlibabaCloudChallengeDriver:
                     return tok
             except Exception:
                 pass
+            tok = self.captured_token_fn()
+            if tok:
+                return tok
             page.wait_for_timeout(120)
         return None
 
@@ -326,22 +524,41 @@ class AlibabaCloudChallengeDriver:
         for sel in FAIL_SELECTORS:
             if frame.query_selector(sel):
                 return True
+        # v2: a still-open panel after the post-solve wait means the drag
+        # did not pass — the widget reloads the puzzle for another try.
+        if self._panel_open(frame) is True:
+            return True
         return False
 
     def _attempt_succeeded(self, frame: Frame) -> bool:
         for sel in SUCCESS_SELECTORS:
             if frame.query_selector(sel):
                 return True
+        # v2: the panel closing means the verify POST was accepted.
+        if self._panel_open(frame) is False:
+            return True
         return False
 
     def solve(self, page: Page) -> ChallengeResult:
         frame = self._find_widget_frame(page)
-        attempt = 0
+        url_before = page.url
         for attempt in range(1, self.max_attempts + 1):
+            # AliyunCaptcha v2 pre-mounts a hidden slider — 'present but not
+            # rendered' means the panel was never opened.
+            if not self._rendered(self._pick_opt(frame, HANDLE_SELECTORS)):
+                self._open_widget(page, frame)
+                frame = self._find_widget_frame(page)
             handle = self._pick(frame, HANDLE_SELECTORS, "slider handle")
             track = self._pick(frame, TRACK_SELECTORS, "slider track")
             log.info("challenge attempt %d/%d", attempt, self.max_attempts)
-            self._drag(page, frame, handle, track)
+            try:
+                distance, method = self._drag(page, frame, handle, track)
+            except ChallengeRejected as exc:
+                # Low-confidence distance → fresh puzzle, not a fresh guess.
+                frame = self._reload_widget(page)
+                if attempt == self.max_attempts:
+                    raise
+                continue
             page.wait_for_timeout(self.post_solve_wait_ms)
             if self._attempt_succeeded(frame):
                 token = self._read_token(page, frame, timeout_ms=2000)
@@ -349,19 +566,38 @@ class AlibabaCloudChallengeDriver:
                     token=token or "",
                     attempts=attempt,
                     first_pass=attempt == 1,
-                    meta={"driver": self.name},
+                    meta={
+                        "driver": self.name,
+                        "distance_px": distance,
+                        "distance_method": method,
+                        "confidence": self.last_confidence,
+                    },
                 )
             if self._attempt_failed(frame):
-                log.warning("challenge attempt %d rejected", attempt)
+                log.warning("challenge attempt %d rejected — reloading widget", attempt)
+                if attempt < self.max_attempts:
+                    frame = self._reload_widget(page)
                 continue
-            # No verdict markers — last chance is the token itself.
             token = self._read_token(page, frame, timeout_ms=1500)
             if token:
                 return ChallengeResult(
                     token=token,
                     attempts=attempt,
                     first_pass=attempt == 1,
-                    meta={"driver": self.name, "verdict": "token"},
+                    meta={"driver": self.name, "verdict": "token",
+                          "distance_px": distance, "distance_method": method,
+                          "confidence": self.last_confidence},
+                )
+            # Solved-by-navigation: some NC variants auto-advance without a
+            # readable token.
+            if page.url != url_before:
+                return ChallengeResult(
+                    token="",
+                    attempts=attempt,
+                    first_pass=attempt == 1,
+                    meta={"driver": self.name, "verdict": "navigation",
+                          "distance_px": distance, "distance_method": method,
+                          "confidence": self.last_confidence},
                 )
             log.warning("challenge attempt %d produced no verdict", attempt)
         raise ChallengeRejected(f"widget rejected {self.max_attempts} attempts")

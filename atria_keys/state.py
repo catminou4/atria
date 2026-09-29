@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS events (
     kind TEXT NOT NULL,
     detail TEXT
 );
+CREATE TABLE IF NOT EXISTS control (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -145,6 +149,28 @@ class StateStore:
                 (time.time(), run_id, stage, kind, detail),
             )
 
+    # --- kill switch / control flags ------------------------------------
+
+    def set_control(self, key: str, value: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO control(key,value) VALUES(?,?)", (key, value)
+            )
+
+    def get_control(self, key: str) -> str | None:
+        cur = self._conn.execute("SELECT value FROM control WHERE key=?", (key,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def paused(self) -> str | None:
+        """Kill-switch state; returns the pause reason or None."""
+        v = self.get_control("paused")
+        return v or None
+
+    def clear_pause(self) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM control WHERE key='paused'")
+
     # --- pacing queries -------------------------------------------------
 
     def last_run_start_ts(self) -> float | None:
@@ -201,6 +227,53 @@ class StateStore:
         if solved_total == 0:
             return None
         return solved_first / solved_total
+
+    def challenge_attempts_today(self) -> int:
+        day_start = time.time() - (time.time() % 86400)
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM events WHERE kind='challenge_attempt' AND ts>=?",
+            (day_start,),
+        )
+        return int(cur.fetchone()[0])
+
+    def avg_stage_durations(self) -> dict[str, float]:
+        cur = self._conn.execute(
+            "SELECT stage, detail FROM events WHERE kind='stage_done'"
+        )
+        sums: dict[str, list[float]] = {}
+        for stage, detail in cur.fetchall():
+            try:
+                dur = json.loads(detail).get("duration_s")
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                continue
+            if dur is not None:
+                sums.setdefault(stage, []).append(float(dur))
+        return {s: sum(v) / len(v) for s, v in sums.items()}
+
+    def distance_confidences(self) -> list[float]:
+        cur = self._conn.execute(
+            "SELECT detail FROM events WHERE kind='challenge_attempt'"
+        )
+        out = []
+        for (detail,) in cur.fetchall():
+            try:
+                c = json.loads(detail).get("confidence")
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                continue
+            if c is not None:
+                out.append(float(c))
+        return out
+
+    def events_for_run(self, run_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            "SELECT ts,run_id,stage,kind,detail FROM events WHERE run_id=?"
+            " ORDER BY ts DESC LIMIT ?",
+            (run_id, limit),
+        )
+        return [
+            {"ts": ts, "run_id": rid, "stage": st, "kind": k, "detail": d}
+            for ts, rid, st, k, d in cur.fetchall()
+        ]
 
     def events_iter(self, kind: str | None = None) -> Iterator[dict[str, Any]]:
         q = "SELECT ts,run_id,stage,kind,detail FROM events"

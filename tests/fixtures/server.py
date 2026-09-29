@@ -3,7 +3,10 @@
   GET /register            -> email form
   POST /api/register       -> creates account, drops verify link in outbox/
   GET /verify?t=           -> page embedding the challenge iframe
-  GET /widget?n=           -> slider widget (Alibaba-signature markup)
+  GET /widget?n=           -> slider widget (Alibaba-signature markup;
+                            widget_mode=attr exposes data-gap, =img serves
+                            /puzzle-img PNGs instead — gap only in the image)
+  GET /puzzle-img          -> generated bg/piece PNG (cv2), gap baked in
   GET /mystery-widget?n=   -> unknown widget variant (no known signature)
   POST /api/challenge-token-> widget-side token minting after trace check
   POST /api/verify-challenge -> host-side verification, issues api_key
@@ -40,7 +43,7 @@ document.getElementById('reg').addEventListener('submit', async (e) => {
 VERIFY_PAGE = """<!doctype html><html><body>
 <div id="verify-box" data-nonce="{nonce}">
   <iframe id="challenge-widget" data-variant="alibaba-slide"
-          src="/widget?n={nonce}" width="360" height="140"></iframe>
+          src="/widget?n={nonce}" width="360" height="200"></iframe>
 </div>
 <div id="result"></div>
 <script>
@@ -85,21 +88,59 @@ WIDGET_PAGE = """<!doctype html><html><body>
   const handle = document.querySelector('[data-role=handle]');
   const state = document.querySelector('.slider-state');
   const GAP = parseFloat(track.dataset.gap);
+  {body_js}
+}})();
+</script></body></html>"""
+
+# Image-mode widget: no data-gap attr — the cutout position exists only in
+# the puzzle PNG. A new render (widget reload) shifts the gap, like the
+# real NC puzzle refresh. `released` still equals the drag distance, so
+# GAP here is the cutout's x-offset relative to the track's left edge.
+WIDGET_IMG_PAGE = """<!doctype html><html><body>
+<div data-role="track" style="position:relative;width:300px;height:156px">
+  <img data-role="puzzle-bg" src="/puzzle-img?n={nonce}&l={load}&k=bg"
+       width="300" height="120" style="position:absolute;left:0;top:0">
+  <img data-role="puzzle-piece" src="/puzzle-img?n={nonce}&l={load}&k=piece"
+       width="46" height="40" style="position:absolute;left:0;top:40px">
+  <div data-role="refresh" title="refresh"
+       style="position:absolute;right:3px;top:3px;width:18px;height:18px;
+              background:#fff;border:1px solid #999;cursor:pointer"></div>
+  <div style="position:absolute;left:0;top:120px;width:300px;height:36px;
+              background:#e8e8e8">
+    <div class="slider-btn" data-role="handle"
+         style="position:absolute;left:0;top:0;width:44px;height:36px;background:#3662d8"></div>
+  </div>
+  <div class="slider-state" data-state="idle"></div>
+</div>
+<script>
+(function() {{
+  const track = document.querySelector('[data-role=track]');
+  const handle = document.querySelector('[data-role=handle]');
+  const state = document.querySelector('.slider-state');
+  const GAP = {gap};
+  document.querySelector('[data-role=refresh]')
+    .addEventListener('click', () => location.reload());
+  {body_js}
+}})();
+</script></body></html>"""
+
+# Shared drag/track-validation logic, interpolated into both widget pages.
+_WIDGET_BODY_JS = """
   let trace = [], dragging = false, t0 = 0;
-  function stat() {{
+  function stat() {
     state.setAttribute('data-state', 'idle');
-  }}
-  handle.addEventListener('mousedown', (e) => {{
+  }
+  handle.addEventListener('mousedown', (e) => {
     dragging = true; t0 = performance.now(); trace = []; e.preventDefault();
-  }});
-  document.addEventListener('mousemove', (e) => {{
+  });
+  document.addEventListener('mousemove', (e) => {
     if (!dragging) return;
     const r = track.getBoundingClientRect();
     const x = Math.max(0, Math.min(300, e.clientX - r.left));
-    trace.push({{x: x, y: e.clientY - r.top, t: performance.now() - t0}});
+    trace.push({x: x, y: e.clientY - r.top, t: performance.now() - t0});
     handle.style.left = (x - 22) + 'px';
-  }});
-  document.addEventListener('mouseup', async () => {{
+  });
+  document.addEventListener('mouseup', async () => {
     if (!dragging) return;
     dragging = false;
     const dur = performance.now() - t0;
@@ -113,30 +154,29 @@ WIDGET_PAGE = """<!doctype html><html><body>
     // server side re-validates; client pre-checks only for UX
     const plausible = trace.length >= 15 && dur >= 300 && dur <= 15000
       && yspread > 0.2 && sd > 0.5 && Math.abs(released - GAP) <= 8;
-    if (!plausible) {{
+    if (!plausible) {
       state.setAttribute('data-state','failed');
-      parent.postMessage({{type:'challenge', failed:true}}, '*');
+      parent.postMessage({type:'challenge', failed:true}, '*');
       handle.style.left = '0px';
       setTimeout(stat, 400);
       return;
-    }}
-    const r = await fetch('/api/challenge-token', {{method:'POST',
-      headers:{{'content-type':'application/json'}},
-      body: JSON.stringify({{nonce:'{nonce}', trace_len:trace.length,
-        duration_ms:dur, released:released}})}});
-    if (r.ok) {{
+    }
+    const r = await fetch('/api/challenge-token', {method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({nonce:'__NONCE__', trace_len:trace.length,
+        duration_ms:dur, released:released})});
+    if (r.ok) {
       const j = await r.json();
       state.setAttribute('data-state','solved');
-      parent.postMessage({{type:'challenge', token:j.token}}, '*');
-    }} else {{
+      parent.postMessage({type:'challenge', token:j.token}, '*');
+    } else {
       state.setAttribute('data-state','failed');
-      parent.postMessage({{type:'challenge', failed:true}}, '*');
+      parent.postMessage({type:'challenge', failed:true}, '*');
       handle.style.left = '0px';
       setTimeout(stat, 400);
-    }}
-  }});
-}})();
-</script></body></html>"""
+    }
+  });
+"""
 
 MYSTERY_PAGE = """<!doctype html><html><body>
 <div class="puzzle-holder" data-kind="mystery">
@@ -149,6 +189,35 @@ def _sha(s: str, n: int = 20) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:n]
 
 
+PIECE_W, PIECE_H, PIECE_Y = 46, 40, 40
+
+
+def render_puzzle(gap_x: int, bg_w: int = 300, bg_h: int = 120) -> tuple[bytes, bytes]:
+    """bg + piece PNGs: noisy gradient background, the cut region lifted
+    into the piece, a darkened cutout with a light outline left behind.
+    Edges are what the CV matcher keys on, like the real puzzle."""
+    import cv2
+    import numpy as np
+
+    rng = np.random.default_rng(gap_x * 7919 + 13)
+    xs = np.linspace(0.0, 1.0, bg_w, dtype=np.float32)[None, :, None]
+    base = 50.0 + 150.0 * xs
+    noise = rng.normal(0, 16, (bg_h, bg_w, 1)) + rng.normal(0, 8, (bg_h, bg_w, 3))
+    bg = np.clip(base + noise, 0, 255).astype(np.uint8)
+    piece = bg[PIECE_Y:PIECE_Y + PIECE_H, gap_x:gap_x + PIECE_W].copy()
+    cv2.rectangle(piece, (0, 0), (PIECE_W - 1, PIECE_H - 1), (250, 250, 250), 2)
+    cv2.rectangle(bg, (gap_x, PIECE_Y), (gap_x + PIECE_W, PIECE_Y + PIECE_H),
+                  (0, 0, 0), -1)
+    cv2.rectangle(bg, (gap_x, PIECE_Y), (gap_x + PIECE_W, PIECE_Y + PIECE_H),
+                  (245, 245, 245), 2)
+    return (cv2.imencode(".png", bg)[1].tobytes(),
+            cv2.imencode(".png", piece)[1].tobytes())
+
+
+def _gap_for(nonce: str, load: int) -> int:
+    return 130 + ((load * 37 + int(_sha(nonce)[:4], 16)) % 105)
+
+
 class FixtureServer:
     def __init__(self, host: str = "127.0.0.1", port: int = 0,
                  outbox_dir: str | Path | None = None):
@@ -158,8 +227,12 @@ class FixtureServer:
         self.accounts: dict[str, dict] = {}
         self.variant = False
         self.flaky_rejects = 0
+        self.widget_mode = "attr"          # "attr" | "img"
+        self._widget_loads: dict[str, int] = {}
+        self._puzzle_cache: dict[str, tuple[bytes, bytes]] = {}
         self.counters = {
             "register_calls": 0,
+            "widget_loads": 0,
             "challenge_token_ok": 0,
             "challenge_token_rej": 0,
             "verify_challenge_ok": 0,
@@ -204,14 +277,36 @@ class FixtureServer:
                     else:
                         self._send(VERIFY_PAGE.format(nonce=acct["nonce"]))
                 elif path == "/widget":
-                    self._send(WIDGET_PAGE.format(nonce=(q.get("n") or [""])[0], gap=200))
+                    nonce = (q.get("n") or [""])[0]
+                    load = outer._widget_loads.get(nonce, 0) + 1
+                    outer._widget_loads[nonce] = load
+                    outer.counters["widget_loads"] += 1
+                    gap = _gap_for(nonce, load)
+                    body_js = _WIDGET_BODY_JS.replace("__NONCE__", nonce)
+                    if outer.widget_mode == "img":
+                        outer._puzzle_cache[f"{nonce}:{load}"] = render_puzzle(gap)
+                        self._send(WIDGET_IMG_PAGE.format(
+                            nonce=nonce, load=load, gap=gap, body_js=body_js))
+                    else:
+                        self._send(WIDGET_PAGE.format(
+                            nonce=nonce, gap=gap, body_js=body_js))
+                elif path == "/puzzle-img":
+                    key = f"{(q.get('n') or [''])[0]}:{(q.get('l') or [''])[0]}"
+                    kind = (q.get("k") or ["bg"])[0]
+                    pair = outer._puzzle_cache.get(key)
+                    if not pair:
+                        self._send("not found", code=404)
+                        return
+                    self._send(pair[0] if kind == "bg" else pair[1], "image/png")
                 elif path == "/mystery-widget":
                     self._send(MYSTERY_PAGE)
                 elif path == "/__state":
                     self._json({"counters": outer.counters,
                                 "accounts": {e: {k: v for k, v in a.items() if k != "token"}
                                              for e, a in outer.accounts.items()},
-                                "variant": outer.variant})
+                                "variant": outer.variant,
+                                "widget_mode": outer.widget_mode,
+                                "widget_loads": outer._widget_loads})
                 else:
                     self._send("not found", code=404)
 
@@ -260,14 +355,19 @@ class FixtureServer:
                 elif path == "/__config":
                     outer.variant = bool(body.get("variant", outer.variant))
                     outer.flaky_rejects = int(body.get("flaky_rejects", outer.flaky_rejects))
+                    if body.get("widget_mode"):
+                        outer.widget_mode = body["widget_mode"]
                     self._json({"ok": True})
                 elif path == "/__reset":
                     outer.accounts.clear()
                     outer._tokens.clear()
+                    outer._widget_loads.clear()
+                    outer._puzzle_cache.clear()
                     for k in outer.counters:
                         outer.counters[k] = 0
                     outer.variant = False
                     outer.flaky_rejects = 0
+                    outer.widget_mode = "attr"
                     for f in outer.outbox_dir.glob("*.txt"):
                         f.unlink()
                     self._json({"ok": True})
