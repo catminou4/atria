@@ -481,12 +481,18 @@ class BrowserDriver:
             base = self.cfg.get("target.base_url", "").rstrip("/")
             self.goto(base + console_path)
             page.wait_for_timeout(2500)
+            clicked: set[str] = set()
             if not self._click_first(create_sels):
                 # Configured candidates missed — scan every visible
                 # button/link for create-ish wording instead of dying.
-                self._click_create_like()
+                # Iterate: first hit is often a nav tab ('→ API Keys'),
+                # the real create button lives one page deeper.
+                for _ in range(3):
+                    if not self._click_create_like(seen=clicked):
+                        break
+                    page.wait_for_timeout(1200)
             # Multi-step consoles open a dialog with its own confirm.
-            self._click_create_like(scope="[role=dialog], dialog, .modal")
+            self._click_create_like(scope="[role=dialog], dialog, .modal", seen=clicked)
         for sel in self.cfg.get("target.selectors.api_key_holder", ["[data-api-key]"]):
             try:
                 el = page.wait_for_selector(sel, timeout=8000, state="attached")
@@ -505,6 +511,21 @@ class BrowserDriver:
         if tok:
             kid = page.evaluate("() => window.__issuedKey.key_id")
             return tok, kid or "key_inline"
+        # Last resort: any element that looks like a raw key display —
+        # long token, no spaces (filters out 'API Keys' labels).
+        for el in page.query_selector_all(
+            "code, input[readonly], [data-clipboard-text], [class*=key]"
+        ):
+            try:
+                cand = (
+                    el.get_attribute("data-clipboard-text")
+                    or el.get_attribute("value")
+                    or el.inner_text()
+                ).strip()
+            except Exception:
+                continue
+            if len(cand) >= 16 and re.fullmatch(r"[A-Za-z0-9_\-.=]+", cand):
+                return cand, f"key_{abs(hash(cand)) & 0xffffffff:x}"
         self._dump_console_state()
         raise DeadSelectorError("api key holder not found on confirmation surface")
 
@@ -521,9 +542,14 @@ class BrowserDriver:
                 return True
         return False
 
-    def _click_create_like(self, scope: str = "body") -> bool:
+    def _click_create_like(
+        self, scope: str = "body", seen: set[str] | None = None
+    ) -> bool:
         """Click the first visible button/link whose text looks like a
-        key-creation control — last-resort when configured selectors miss."""
+        key-creation control — last-resort when configured selectors
+        miss. `seen` tracks texts already clicked so the loop walks
+        deeper instead of re-clicking the same nav tab."""
+        seen = seen if seen is not None else set()
         for el in self.page.query_selector_all(f"{scope} button, {scope} a, {scope} [role=button]"):
             try:
                 if not el.is_visible():
@@ -531,8 +557,14 @@ class BrowserDriver:
                 txt = (el.inner_text() or "").strip()
             except Exception:
                 continue
-            if txt and len(txt) < 40 and self._CREATE_TEXT_RE.search(txt):
+            if (
+                txt
+                and len(txt) < 40
+                and txt not in seen
+                and self._CREATE_TEXT_RE.search(txt)
+            ):
                 log.info("console create fallback: clicking %r", txt)
+                seen.add(txt)
                 el.click()
                 self.page.wait_for_timeout(1500)
                 return True
