@@ -393,16 +393,36 @@ class BrowserDriver:
         )
         self.goto(url)
         assert self.page is not None
-        self.page.wait_for_timeout(int(self.cfg.get("run.page_settle_ms", 2000)))
-        # Hosted-auth entry (Logto): the account form is behind a
-        # 'Create account' link. Optional — absent on the fixture.
-        for sel in self.cfg.get("target.selectors.create_account_link", []):
-            el = self.page.query_selector(sel)
-            if el:
-                el.click()
-                self.page.wait_for_timeout(2000)
+        settle = int(self.cfg.get("run.page_settle_ms", 2000))
+        self.page.wait_for_timeout(settle)
+        field = None
+        for attempt in range(2):
+            # Hosted-auth entry (Logto): the account form is behind a
+            # 'Create account' link. Optional — absent on the fixture.
+            for sel in self.cfg.get("target.selectors.create_account_link", []):
+                el = self.page.query_selector(sel)
+                if el:
+                    el.click()
+                    self.page.wait_for_timeout(2000)
+                    break
+            try:
+                field = self._first_selector("email_input", "email input")
                 break
-        field = self._first_selector("email_input", "email input")
+            except DeadSelectorError:
+                if attempt == 1:
+                    raise
+                # The shared profile keeps an authenticated Logto session
+                # after a successful run — /register then skips straight to
+                # the app with no identifier field. Clear cookies and redo
+                # the flow logged out.
+                log.info(
+                    "no email field — stale auth session in profile; "
+                    "clearing cookies and retrying"
+                )
+                self.context.clear_cookies()
+                self.goto(url)
+                self.page.wait_for_timeout(settle)
+        assert field is not None
         self._human_type(field, email)
         submit = self._first_selector("submit", "submit button")
         # Human read-back pause before committing the form.
