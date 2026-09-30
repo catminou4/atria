@@ -491,7 +491,9 @@ class BrowserDriver:
                     if not self._click_create_like(seen=clicked):
                         break
                     page.wait_for_timeout(1200)
-            # Multi-step consoles open a dialog with its own confirm.
+            # Multi-step consoles open a dialog with its own confirm —
+            # and the name field must be filled before it enables.
+            self._fill_dialog_name()
             self._click_create_like(scope="[role=dialog], dialog, .modal", seen=clicked)
         for sel in self.cfg.get("target.selectors.api_key_holder", ["[data-api-key]"]):
             try:
@@ -530,7 +532,8 @@ class BrowserDriver:
         raise DeadSelectorError("api key holder not found on confirmation surface")
 
     _CREATE_TEXT_RE = re.compile(
-        r"create|new|generat|créer|ajouter|新建|创建|生成|添加", re.I
+        r"create|new|generat|créer|ajouter|confirm|ok\b|save|submit|"
+        r"新建|创建|生成|添加|确定|确认|保存", re.I
     )
 
     def _click_first(self, sels) -> bool:
@@ -568,6 +571,27 @@ class BrowserDriver:
                 el.click()
                 self.page.wait_for_timeout(1500)
                 return True
+        return False
+
+    def _fill_dialog_name(self) -> bool:
+        """Key-creation dialogs ask for a name before enabling their
+        confirm button — fill the first visible text input."""
+        for el in self.page.query_selector_all(
+            "[role=dialog] input:not([type=hidden]), "
+            "dialog input:not([type=hidden]), "
+            ".modal input:not([type=hidden])"
+        ):
+            try:
+                if not el.is_visible():
+                    continue
+                if (el.get_attribute("type") or "text") not in (
+                    "text", "search", "name", ""
+                ):
+                    continue
+            except Exception:
+                continue
+            self._human_type(el, f"atria-key-{self.run_id[:8]}")
+            return True
         return False
 
     def _dump_console_state(self) -> None:
