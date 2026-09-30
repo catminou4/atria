@@ -426,6 +426,7 @@ class AlibabaCloudChallengeDriver:
                 self._last_puzzle = {
                     "bg": bg_bytes, "piece": piece_bytes or b"",
                     "gap_x": det.gap_x, "distance": distance,
+                    "gap_css": gap_css, "bg_box": ibox,
                 }
                 # Closed-loop servo target: the piece offset (relative to
                 # the bg box) the widget must reach. Elements are
@@ -547,7 +548,10 @@ class AlibabaCloudChallengeDriver:
 
     def _dump_panel(self, page: Page, reason: str) -> None:
         """Screenshot the widget panel post-verdict — shows where the
-        piece actually landed vs the visible cutout."""
+        piece actually landed vs the visible cutout. Also writes an
+        annotated copy with the detected gap x drawn on top, so one image
+        carries the hole, the landed piece, and what the detector aimed
+        at."""
         try:
             frame = self._find_widget_frame(page)
             panel = frame.query_selector(PANEL_SELECTOR) if frame else None
@@ -555,9 +559,26 @@ class AlibabaCloudChallengeDriver:
                 return
             self.artifacts_dir.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d-%H%M%S")
-            panel.screenshot(
-                path=str(self.artifacts_dir / f"challenge-panel-{reason}-{ts}.png")
-            )
+            shot = panel.screenshot()
+            (self.artifacts_dir / f"challenge-panel-{reason}-{ts}.png").write_bytes(shot)
+            lp = self._last_puzzle or {}
+            gap_css = lp.get("gap_css")
+            bg_box = lp.get("bg_box")
+            panel_box = panel.bounding_box()
+            if gap_css is None or not bg_box or not panel_box:
+                return
+            img = cv2.imdecode(np.frombuffer(shot, np.uint8), cv2.IMREAD_COLOR)
+            if img is None or not panel_box["width"]:
+                return
+            scale = img.shape[1] / panel_box["width"]
+            x = int(round((bg_box["x"] - panel_box["x"] + gap_css) * scale))
+            cv2.line(img, (x, 0), (x, img.shape[0]), (0, 0, 255), 3)
+            ok, enc = cv2.imencode(".png", img)
+            if ok:
+                (
+                    self.artifacts_dir
+                    / f"challenge-panel-{reason}-annotated-{ts}.png"
+                ).write_bytes(enc.tobytes())
         except Exception:
             pass
 
