@@ -630,12 +630,13 @@ class AlibabaCloudChallengeDriver:
         page.wait_for_timeout(self.rng.uniform(80, 220))
         page.mouse.down()
         page.wait_for_timeout(self.rng.uniform(120, 300))
-        # Open-loop phase: bezier path up to ~75% of the distance — cheap
-        # and looks human. Then the servo closes on the measured piece
-        # position (the widget's elastic mapping makes blind drags land
-        # consistently short).
+        # Open-loop phase: bezier path up to ~80-88% of the distance.
+        # Then a pause + at most two human-scale corrections against the
+        # measured piece position — the widget's elastic mapping makes
+        # blind drags land short, but a 70-step closed-loop crawl is a
+        # trajectory signature no mouse produces.
         cursor = 0.0
-        rough = distance * 0.75
+        rough = distance * self.rng.uniform(0.80, 0.88)
         for dx, dy, dt in slide:
             if dx > rough:
                 break
@@ -647,10 +648,14 @@ class AlibabaCloudChallengeDriver:
         servo_err = None
         piece_moves = False
         if gap_off is not None:
+            # Human aiming isn't pixel-perfect — a dead-center hole every
+            # single attempt is its own automation tell.
+            aim_off = gap_off + self.rng.gauss(0, 0.8)
+            # Reading pause — a human looks at where the piece stands
+            # before correcting.
+            page.wait_for_timeout(self.rng.uniform(250, 600))
             start_off = None
-            for i in range(70):
-                # Fresh lookups every step — the piece node can be swapped
-                # or remounted once the drag starts.
+            for corr in range(3):  # humans make at most ~2-3 corrections
                 pbox = self._first_box(frame, PIECE_IMAGE_SELECTORS)
                 ibox = self._first_box(frame, BG_IMAGE_SELECTORS)
                 if not pbox or not ibox:
@@ -659,24 +664,34 @@ class AlibabaCloudChallengeDriver:
                 if start_off is None:
                     start_off = off
                 piece_moves = piece_moves or abs(off - start_off) > 0.5
-                servo_err = gap_off - off
-                if abs(servo_err) <= 1.5:
+                servo_err = aim_off - off
+                if abs(servo_err) <= 2.0:
                     servo_done = True
                     break
-                if i >= 3 and not piece_moves:
-                    # Non-elastic widget (e.g. fixture): the piece doesn't
-                    # track the pointer — finish open-loop to `distance`.
+                if abs(servo_err) > min(80.0, distance * 0.4):
+                    # An error this large means the piece offset isn't
+                    # tracking the pointer (non-elastic widget) — the
+                    # "correction" would overshoot wildly. Finish
+                    # open-loop instead.
                     break
-                step = servo_err * 0.35
-                mag = max(2.0, min(16.0, abs(step)))
-                cursor += math.copysign(mag, step)
-                page.mouse.move(
-                    hx + cursor,
-                    hy + self.rng.uniform(-1.5, 1.5),
-                )
-                page.wait_for_timeout(self.rng.uniform(12, 30))
-            # Settle — the piece eases into place; confirm before release.
-            page.wait_for_timeout(self.rng.uniform(100, 200))
+                if corr > 0 and abs(off - start_off) <= 0.5:
+                    # A first correction already moved the pointer but the
+                    # piece didn't follow — non-elastic widget (e.g.
+                    # fixture): finish open-loop to `distance`.
+                    break
+                # One human-scale correction sweep: a few eased points
+                # over a few hundred ms — never a closed-loop crawl.
+                aim = servo_err * self.rng.uniform(0.85, 1.05)
+                n = self.rng.randint(3, 7)
+                start_cursor = cursor
+                for j in range(1, n + 1):
+                    pos = start_cursor + aim * _ease_in_out(j / n)
+                    page.mouse.move(
+                        hx + pos, hy + self.rng.uniform(-2.0, 2.0)
+                    )
+                    page.wait_for_timeout(self.rng.uniform(35, 90))
+                cursor += aim
+                page.wait_for_timeout(self.rng.uniform(150, 400))
             log.info(
                 "servo: %s err=%s moves=%s",
                 "converged" if servo_done else "incomplete",
