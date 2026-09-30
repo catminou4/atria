@@ -424,11 +424,57 @@ class BrowserDriver:
                 self.page.wait_for_timeout(settle)
         assert field is not None
         self._human_type(field, email)
-        submit = self._first_selector("submit", "submit button")
+        submit = self._registration_submit()
         # Human read-back pause before committing the form.
         self.page.wait_for_timeout(random.Random().randint(350, 1200))
         submit.click()
         self.page.wait_for_timeout(1500)
+
+    _SOCIAL_RE = re.compile(
+        r"google|github|facebook|apple|microsoft|linkedin|discord|twitter|sso|"
+        r"oauth|social|connector|sign in with|connecter avec",
+        re.IGNORECASE,
+    )
+    _CREATE_ACCOUNT_RE = re.compile(
+        r"create|sign up|register|créer|inscrire|continuer|continue|"
+        r"注册|创建|下一步",
+        re.IGNORECASE,
+    )
+
+    def _registration_submit(self):
+        """Pick the real account-creation submit — Logto renders social
+        'Sign in with Google/GitHub' buttons as `button[type=submit]` too,
+        and bare first-match picks them."""
+        page = self.page
+        assert page is not None
+        candidates = []
+        for sel in self.cfg.get("target.selectors.submit", []):
+            try:
+                candidates.extend(page.query_selector_all(sel))
+            except Exception:
+                continue
+        non_social = []
+        for el in candidates:
+            try:
+                text = el.inner_text() or ""
+                label = el.get_attribute("aria-label") or ""
+                cls = el.get_attribute("class") or ""
+            except Exception:
+                continue
+            blob = f"{text} {label} {cls}"
+            if self._SOCIAL_RE.search(blob):
+                continue
+            non_social.append((el, text))
+        if not non_social:
+            raise DeadSelectorError(
+                "submit button: only social-provider buttons matched"
+            )
+        for el, text in non_social:
+            if self._CREATE_ACCOUNT_RE.search(text):
+                log.info("registration submit: %r", text.strip()[:40])
+                return el
+        log.info("registration submit: %r (first non-social)", non_social[0][1].strip()[:40])
+        return non_social[0][0]
 
     def _human_type(self, field, text: str) -> None:
         """Click + per-char key events — fill() fires no keydown/keyup and
