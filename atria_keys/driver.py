@@ -481,12 +481,12 @@ class BrowserDriver:
             base = self.cfg.get("target.base_url", "").rstrip("/")
             self.goto(base + console_path)
             page.wait_for_timeout(2500)
-            for sel in create_sels:
-                el = page.query_selector(sel)
-                if el:
-                    el.click()
-                    page.wait_for_timeout(1500)
-                    break
+            if not self._click_first(create_sels):
+                # Configured candidates missed — scan every visible
+                # button/link for create-ish wording instead of dying.
+                self._click_create_like()
+            # Multi-step consoles open a dialog with its own confirm.
+            self._click_create_like(scope="[role=dialog], dialog, .modal")
         for sel in self.cfg.get("target.selectors.api_key_holder", ["[data-api-key]"]):
             try:
                 el = page.wait_for_selector(sel, timeout=8000, state="attached")
@@ -505,4 +505,50 @@ class BrowserDriver:
         if tok:
             kid = page.evaluate("() => window.__issuedKey.key_id")
             return tok, kid or "key_inline"
+        self._dump_console_state()
         raise DeadSelectorError("api key holder not found on confirmation surface")
+
+    _CREATE_TEXT_RE = re.compile(
+        r"create|new|generat|créer|ajouter|新建|创建|生成|添加", re.I
+    )
+
+    def _click_first(self, sels) -> bool:
+        for sel in sels:
+            el = self.page.query_selector(sel)
+            if el:
+                el.click()
+                self.page.wait_for_timeout(1500)
+                return True
+        return False
+
+    def _click_create_like(self, scope: str = "body") -> bool:
+        """Click the first visible button/link whose text looks like a
+        key-creation control — last-resort when configured selectors miss."""
+        for el in self.page.query_selector_all(f"{scope} button, {scope} a, {scope} [role=button]"):
+            try:
+                if not el.is_visible():
+                    continue
+                txt = (el.inner_text() or "").strip()
+            except Exception:
+                continue
+            if txt and len(txt) < 40 and self._CREATE_TEXT_RE.search(txt):
+                log.info("console create fallback: clicking %r", txt)
+                el.click()
+                self.page.wait_for_timeout(1500)
+                return True
+        return False
+
+    def _dump_console_state(self) -> None:
+        """On extraction failure, leave the console DOM + screenshot in
+        artifacts — the real selectors are learned from it, not guessed."""
+        try:
+            adir = self.cfg.path("artifacts.dir", "keys/artifacts")
+            adir.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            html = self.page.content()
+            html = _KEY_RE.sub("[REDACTED-KEY]", html)
+            (adir / f"console-{ts}.html").write_text(html, encoding="utf-8")
+            self.page.screenshot(path=str(adir / f"console-{ts}.png"), full_page=True)
+            log.info("console state dumped to %s/console-%s.*", adir, ts)
+        except Exception as exc:
+            log.warning("console dump failed: %s", exc)
