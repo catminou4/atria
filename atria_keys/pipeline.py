@@ -137,7 +137,12 @@ class Pipeline:
             for fut in concurrent.futures.as_completed(
                 [ex.submit(_work, rid) for rid in pending]
             ):
-                fut.result()
+                try:
+                    fut.result()
+                except Exception as exc:
+                    # A worker escaping run()'s own error handling must not
+                    # kill the whole batch.
+                    log.error("parallel worker crashed: %s", exc)
         return run_ids
 
     # -- single run ---------------------------------------------------------
@@ -217,6 +222,7 @@ class Pipeline:
 
     def _stage_mailbox(self, ctx, driver) -> dict:
         email = self.mailbox.allocate_address(ctx["run_id"])
+        log.info("mailbox: run %s -> %s", ctx["run_id"], email)
         self.state.set_email(ctx["run_id"], email)
         self.state.event(ctx["run_id"], "mailbox", "address_allocated", email)
         return {"email": email}
