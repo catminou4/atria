@@ -11,6 +11,7 @@ import concurrent.futures
 import json
 import logging
 import random
+import threading
 import time
 import uuid
 from typing import Any, Callable
@@ -28,6 +29,10 @@ from .errors import (
 from .state import STAGES, StateStore
 
 log = logging.getLogger("atria_keys.pipeline")
+
+# input() is process-wide — serialize OTP prompts across parallel workers
+# so each run's 'code for <email>' banner is answered one at a time.
+_OTP_PROMPT_LOCK = threading.Lock()
 
 
 class Pipeline:
@@ -313,19 +318,47 @@ class Pipeline:
         return {"token": result.token, "attempts": result.attempts,
                 "confidence": result.meta.get("confidence")}
 
+    def _prompt_for_code(self, email: str, reason: Exception) -> str:
+        """Manual mode fallback: the human solving captchas is at the
+        keyboard — when the mailbox can't be read, ask for the code in
+        the terminal and type it for them. Empty input aborts the run."""
+        with _OTP_PROMPT_LOCK:
+            try:
+                entered = input(
+                    f"\n>>> manual OTP — mailbox unreadable ({reason}).\n"
+                    f">>> code for {email} (empty = abort run) > "
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                entered = ""
+        if not entered:
+            raise reason if isinstance(reason, Exception) else TransientError(
+                str(reason))
+        return entered
+
     def _stage_key_extract(self, ctx, driver) -> dict:
         if ctx.get("register", {}).get("verify_flow") == "code":
             # The code only goes out after the captcha was accepted, so the
             # mailbox wait happens here — post-challenge, on the same page.
             email = ctx["register"]["email"]
-            msg = self.mailbox.wait_for_message(
-                email,
-                timeout_s=float(self.cfg.get("mailbox.timeout_s", 180)),
-                poll_s=float(self.cfg.get("mailbox.poll_interval_s", 5)),
-            )
-            if not msg.otp:
-                raise TransientError("verification message carried no code")
-            driver.enter_verification_code(msg.otp)
+            manual = overrides.challenge_mode(self.cfg) == "manual"
+            otp: str | None = None
+            try:
+                msg = self.mailbox.wait_for_message(
+                    email,
+                    timeout_s=float(self.cfg.get("mailbox.timeout_s", 180)),
+                    poll_s=float(self.cfg.get("mailbox.poll_interval_s", 5)),
+                )
+                otp = msg.otp
+            except Exception as exc:
+                if not manual:
+                    raise
+                otp = self._prompt_for_code(email, exc)
+            if not otp:
+                if not manual:
+                    raise TransientError("verification message carried no code")
+                otp = self._prompt_for_code(
+                    email, TransientError("verification message carried no code"))
+            driver.enter_verification_code(otp)
             self.state.event(ctx["run_id"], "key_extract", "verified", "code")
         api_key, key_id = driver.extract_api_key()
         self.state.event(ctx["run_id"], "key_extract", "key_seen", key_id)
