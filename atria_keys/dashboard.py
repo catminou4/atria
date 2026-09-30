@@ -171,6 +171,18 @@ def build_body(state: StateStore, keystore: KeyStore, artifacts_dir: Path,
         files = sorted(artifacts_dir.rglob("*"), key=lambda p: p.stat().st_mtime,
                        reverse=True)[:30]
         files = [f for f in files if f.is_file()]
+        imgs = [f for f in files if f.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")][:8]
+        if imgs:
+            parts.append("<h2>latest screenshots — drag these into chat</h2>")
+            gallery = "".join(
+                f"<a href='/artifacts/{urllib.parse.quote(str(f.relative_to(artifacts_dir)))}' "
+                f"target='_blank' title='{html.escape(f.name)}'>"
+                f"<img loading='lazy' src='/artifacts/{urllib.parse.quote(str(f.relative_to(artifacts_dir)))}' "
+                f"alt='{html.escape(f.name)}' style='max-width:280px;max-height:200px;"
+                f"margin:4px;border:1px solid #888;vertical-align:top'></a>"
+                for f in imgs
+            )
+            parts.append(f"<div>{gallery}</div>")
         if files:
             parts.append("<h2>artifacts</h2>")
             parts.append(
