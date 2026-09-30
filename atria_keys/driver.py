@@ -431,7 +431,15 @@ class BrowserDriver:
         self._human_type(field, code)
         try:
             submit = self._first_selector("code_submit", "code submit button")
-            submit.click()
+            try:
+                submit.click()
+            except Exception as exc:
+                # The click submits the <form>; when the page navigates
+                # mid-click (the usual happy path) the button detaches and
+                # Playwright's actionability retry raises — harmless.
+                if "attached" not in str(exc) and "enabled" not in str(exc):
+                    raise
+                log.info("code submit raced with navigation — form sent")
         except DeadSelectorError:
             # Logto verification forms are real <form>s — Enter submits.
             log.info("no code_submit selector matched; pressing Enter")
