@@ -714,6 +714,19 @@ class AlibabaCloudChallengeDriver:
         page.mouse.up()
         return distance, method
 
+    def _panel_blank(self, frame: Frame) -> bool:
+        """Panel rendered but its puzzle assets never painted — the widget
+        can sit on an empty grey box indefinitely (throttled CDN assets).
+        A blank panel gives the human nothing to solve."""
+        try:
+            el = frame.query_selector(PANEL_SELECTOR)
+            if el is None or not el.is_visible():
+                return False
+            shot = el.screenshot()
+        except Exception:
+            return False
+        return bool(shot) and image_is_blank(shot)
+
     def _wait_human(self, page: Page, frame: Frame) -> tuple[float | None, str]:
         """Manual mode: the widget is open, a human drags the slider.
         Poll for the outcome — solved, server-rejected, widget-failed —
@@ -728,6 +741,12 @@ class AlibabaCloudChallengeDriver:
         # would score a false success and burn the attempt.
         panel_seen = self._panel_open(frame) is True or self._rendered(
             self._pick_opt(frame, HANDLE_SELECTORS))
+        # Blank-panel watchdog: if the open panel never paints a puzzle,
+        # click the widget's own refresh (up to N times) instead of
+        # waiting out the timeout on a dead panel.
+        blank_since: float | None = None
+        blank_check_at = 0.0
+        blank_refreshes = 0
         while time.monotonic() < deadline:
             if self._server_rejected(page):
                 return None, "manual"  # post-solve check handles the reject
@@ -746,8 +765,35 @@ class AlibabaCloudChallengeDriver:
                     or self._rendered(
                         self._pick_opt(frame, HANDLE_SELECTORS))
                 )
+                blank_since = None
             else:
                 frame = self._find_widget_frame(page)
+                now = time.monotonic()
+                if now >= blank_check_at:
+                    blank_check_at = now + 1.5
+                    if self._panel_blank(frame):
+                        if blank_since is None:
+                            blank_since = now
+                        elif now - blank_since > 12.0:
+                            if blank_refreshes >= 3:
+                                raise ChallengeRejected(
+                                    "puzzle panel stayed blank after refreshes")
+                            refresh = self._pick_opt(frame, REFRESH_SELECTORS)
+                            if refresh is None:
+                                raise ChallengeRejected(
+                                    "puzzle panel blank, no refresh control")
+                            log.warning(
+                                "manual mode: puzzle panel blank — "
+                                "clicking widget refresh (%d/3)",
+                                blank_refreshes + 1)
+                            try:
+                                refresh.click()
+                            except Exception:
+                                pass
+                            blank_refreshes += 1
+                            blank_since = now
+                    else:
+                        blank_since = None
             page.wait_for_timeout(400)
         raise ChallengeRejected(
             f"manual solve timeout after {self.manual_timeout_s:.0f}s")
