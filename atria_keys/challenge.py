@@ -470,17 +470,24 @@ class AlibabaCloudChallengeDriver:
             # settle wait — re-clicking the opener would toggle it shut.
             if self._rendered(self._pick_opt(frame, HANDLE_SELECTORS)):
                 return
-            clicked = False
-            for sel in OPENER_SELECTORS:
-                opener = frame.query_selector(sel)
+            # Slow link/proxy: the widget JS takes seconds to mount its
+            # collapsed opener — wait for it instead of clicking blind.
+            opener = None
+            wait_end = time.monotonic() + self.opener_deadline_s
+            while time.monotonic() < wait_end and opener is None:
+                for sel in OPENER_SELECTORS:
+                    opener = frame.query_selector(sel)
+                    if opener is not None:
+                        break
                 if opener is None:
-                    continue
+                    page.wait_for_timeout(200)
+            clicked = False
+            if opener is not None:
                 try:
                     opener.click()
                     clicked = True
                 except Exception:
-                    continue
-                break
+                    pass
             if not clicked:
                 page.wait_for_timeout(1500)
                 continue
