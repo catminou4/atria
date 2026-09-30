@@ -723,14 +723,31 @@ class AlibabaCloudChallengeDriver:
         log.info("manual mode: solve the slider in the browser window "
                  "(waiting up to %.0fs)", self.manual_timeout_s)
         deadline = time.monotonic() + self.manual_timeout_s
+        # A closed panel only reads as a pass if the panel was actually
+        # seen OPEN — while the iframe is still mounting, 'not open'
+        # would score a false success and burn the attempt.
+        panel_seen = self._panel_open(frame) is True or self._rendered(
+            self._pick_opt(frame, HANDLE_SELECTORS))
         while time.monotonic() < deadline:
             if self._server_rejected(page):
                 return None, "manual"  # post-solve check handles the reject
-            if self._attempt_succeeded(frame):
-                return None, "manual"
             if self.captured_token_fn():
                 return None, "manual"
-            frame = self._find_widget_frame(page)
+            # An explicit success marker is a pass any time; the
+            # closed-panel heuristic only counts once the panel was
+            # observed open.
+            if (panel_seen and self._attempt_succeeded(frame)) or any(
+                    frame.query_selector(sel) for sel in SUCCESS_SELECTORS):
+                return None, "manual"
+            if not panel_seen:
+                frame = self._find_widget_frame(page)
+                panel_seen = (
+                    self._panel_open(frame) is True
+                    or self._rendered(
+                        self._pick_opt(frame, HANDLE_SELECTORS))
+                )
+            else:
+                frame = self._find_widget_frame(page)
             page.wait_for_timeout(400)
         raise ChallengeRejected(
             f"manual solve timeout after {self.manual_timeout_s:.0f}s")
