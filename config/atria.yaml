@@ -106,7 +106,7 @@ browser:
   # endpoint; creds come from the env vars, never committed here.
   proxy:
     enabled: false
-    server: ""            # http://host:port or socks5://host:port
+    server: http://eu.nettify.xyz:8080   # http://host:port or socks5://host:port
     username_env: ATRIA_PROXY_USER
     password_env: ATRIA_PROXY_PASS
 session:
