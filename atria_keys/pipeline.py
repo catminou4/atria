@@ -87,6 +87,7 @@ class Pipeline:
     def run(self, run_id: str) -> dict[str, Any]:
         ctx: dict[str, Any] = {"run_id": run_id}
         driver = None
+        run_t0 = time.monotonic()
         try:
             driver = self.driver_factory(self.cfg, run_id)
             driver.__enter__()
@@ -122,6 +123,17 @@ class Pipeline:
             return {"run_id": run_id, "failed": str(exc), "class": cls}
         finally:
             if driver is not None:
+                try:
+                    self.state.set_run_stats(
+                        run_id,
+                        duration_s=round(time.monotonic() - run_t0, 1),
+                        bytes_est=getattr(driver, "bytes_used", None),
+                        proxy_mode=getattr(driver, "proxy_mode", None),
+                        mailbox_kind=getattr(self.mailbox, "last_kind", None)
+                        or type(self.mailbox).__name__,
+                    )
+                except Exception:
+                    pass
                 driver.__exit__(None, None, None)
 
     def _with_retry(self, run_id, stage, ctx, driver):

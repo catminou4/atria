@@ -61,6 +61,33 @@ class StateStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         with self._lock, self._conn:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Additive column migrations for the runs table."""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(runs)")}
+        wanted = {
+            "duration_s": "REAL",
+            "bytes_est": "INTEGER",
+            "proxy_mode": "TEXT",
+            "mailbox_kind": "TEXT",
+        }
+        for col, ddl in wanted.items():
+            if col not in cols:
+                self._conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {ddl}")
+
+    def set_run_stats(self, run_id: str, *, duration_s=None, bytes_est=None,
+                      proxy_mode=None, mailbox_kind=None) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE runs SET duration_s=COALESCE(?,duration_s),"
+                " bytes_est=COALESCE(?,bytes_est),"
+                " proxy_mode=COALESCE(?,proxy_mode),"
+                " mailbox_kind=COALESCE(?,mailbox_kind),"
+                " updated_at=? WHERE run_id=?",
+                (duration_s, bytes_est, proxy_mode, mailbox_kind,
+                 time.time(), run_id),
+            )
 
     def close(self) -> None:
         self._conn.close()

@@ -353,8 +353,7 @@ class TempMailLolReader:
         raise VerificationTimeout(f"no message for {recipient} within {timeout_s}s")
 
 
-def build_reader(cfg) -> MailboxReader:
-    kind = cfg.get("mailbox.reader", "imap")
+def build_reader_for_kind(cfg, kind: str) -> MailboxReader:
     template = cfg.get("mailbox.address_template", "svc-{run_id}@{catchall_domain}")
     domain = cfg.get("mailbox.catchall_domain", "example.com")
     if kind == "fixture":
@@ -382,3 +381,34 @@ def build_reader(cfg) -> MailboxReader:
             domain=domain,
         )
     raise ValueError(f"unknown mailbox reader: {kind}")
+
+
+def build_reader(cfg) -> MailboxReader:
+    return build_reader_for_kind(cfg, cfg.get("mailbox.reader", "imap"))
+
+
+class SwitchableMailbox:
+    """MailboxReader that re-reads the dashboard override each call so the
+    reader kind (imap vs tempmaillol) can flip between runs without a
+    config edit. Concrete readers are built lazily per kind — temp readers
+    keep per-address tokens on the instance."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self._readers: dict[str, MailboxReader] = {}
+        self.last_kind: str | None = None
+
+    def _reader(self) -> MailboxReader:
+        from . import overrides
+
+        kind = overrides.mailbox_reader(self.cfg)
+        if kind not in self._readers:
+            self._readers[kind] = build_reader_for_kind(self.cfg, kind)
+        self.last_kind = kind
+        return self._readers[kind]
+
+    def allocate_address(self, run_id: str) -> str:
+        return self._reader().allocate_address(run_id)
+
+    def wait_for_message(self, recipient, timeout_s, poll_s=5.0):
+        return self._reader().wait_for_message(recipient, timeout_s, poll_s)

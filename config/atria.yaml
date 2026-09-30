@@ -81,6 +81,17 @@ browser:
   # Stable shared profile — the daily `warmup` ages this same dir so runs
   # inherit accumulated device trust instead of starting cold each time.
   profile: warm
+  # Abort analytics/cross-origin fonts+images/media — cuts egress bytes
+  # (matters when traffic rides a paid proxy). Captcha/app hosts exempt.
+  optimize_bandwidth: true
+  # Per-context egress proxy — flip on/off from the dashboard switch
+  # (keys/overrides.json). Fill server when you have a residential
+  # endpoint; creds come from the env vars, never committed here.
+  proxy:
+    enabled: false
+    server: ""            # http://host:port or socks5://host:port
+    username_env: ATRIA_PROXY_USER
+    password_env: ATRIA_PROXY_PASS
 session:
   warm_dwell_s: 45
   warm_paths:

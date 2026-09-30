@@ -19,7 +19,7 @@ from pathlib import Path
 from .config import Config
 from .errors import PipelineError
 from .keystore import KeyStore, mask_key
-from .mailbox import build_reader
+from .mailbox import SwitchableMailbox
 from .pacing import Pacer
 from .pipeline import Pipeline
 from .state import StateStore
@@ -80,7 +80,7 @@ def _fixture_overrides(cfg: Config, server) -> Config:
 def _build_pipeline(cfg: Config) -> Pipeline:
     state = StateStore(cfg.path("state.db_path", "keys/state.db"))
     keystore = KeyStore(cfg.path("keystore.path", "keys/keys.jsonl"))
-    mailbox = build_reader(cfg)
+    mailbox = SwitchableMailbox(cfg)
     pacer = Pacer(
         state,
         min_interval_s=float(cfg.get("pacing.min_interval_s", 600)),
@@ -120,6 +120,7 @@ def cmd_run(args) -> int:
             int(cfg.get("dashboard.port", 8686)),
             int(cfg.get("dashboard.refresh_s", 4)),
             artifacts_dir=cfg.path("artifacts.dir", "keys/artifacts"),
+            cfg=cfg,
         )
         log.info(
             "dashboard: http://%s:%d", cfg.get("dashboard.host"), cfg.get("dashboard.port")
@@ -179,7 +180,7 @@ def cmd_dashboard(args) -> int:
     host = cfg.get("dashboard.host", "127.0.0.1")
     port = int(cfg.get("dashboard.port", 8686))
     serve(state, ks, host, port, int(cfg.get("dashboard.refresh_s", 4)),
-          artifacts_dir=cfg.path("artifacts.dir", "keys/artifacts"))
+          artifacts_dir=cfg.path("artifacts.dir", "keys/artifacts"), cfg=cfg)
     print(f"dashboard on http://{host}:{port} — Ctrl-C to stop")
     try:
         threading.Event().wait()

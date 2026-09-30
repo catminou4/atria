@@ -19,18 +19,37 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import re
 import time
+import urllib.parse
 from pathlib import Path
 
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
 from playwright.sync_api import TimeoutError as PWTimeout
 
+from . import overrides
 from .challenge import install_token_hook
 from .errors import DeadSelectorError, TransientError
 
 log = logging.getLogger("atria_keys.driver")
+
+# Analytics/telemetry endpoints — pure bandwidth waste, aborted outright.
+_DENY_RE = re.compile(
+    r"googletagmanager|google-analytics|sentry\.io|clarity\.ms|hotjar"
+    r"|segment\.(io|com)|amplitude|datadoghq|fullstory|logrocket|mixpanel"
+    r"|doubleclick|facebook\.net|connect\.facebook",
+    re.IGNORECASE,
+)
+
+# Hosts whose resources are functional (puzzle images, iconfont slider,
+# the Logto app itself) — never blocked regardless of type.
+_ALLOW_HOST_RE = re.compile(
+    r"(^|\.)(aliyuncs\.com|aliyun\.com|alicdn\.com|alibaba\.com|localhost|"
+    r"127\.0\.0\.1|0\.0\.0\.0)$",
+    re.IGNORECASE,
+)
 
 _KEY_RE = re.compile(r"\b(?:ak|atr)[-_][A-Za-z0-9_\-]{8,}\b")
 
@@ -60,6 +79,8 @@ class BrowserDriver:
         )
         self.captured: list[dict] = []
         self._generation = 0
+        self.bytes_used = 0
+        self.proxy_mode = "direct"
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -67,6 +88,61 @@ class BrowserDriver:
         self._pw = sync_playwright().start()
         self._open_context()
         return self
+
+    def _proxy_kwargs(self) -> dict:
+        """Per-context egress proxy — flipped from the dashboard via
+        overrides.json. Credentials come from env vars, never the yaml."""
+        pcfg = self.cfg.get("browser.proxy") or {}
+        if not overrides.proxy_enabled(self.cfg) or not pcfg.get("server"):
+            self.proxy_mode = "direct"
+            return {}
+        self.proxy_mode = "proxy"
+        proxy = {"server": pcfg["server"]}
+        for key, env_key in (("username", "username_env"),
+                             ("password", "password_env")):
+            env_name = pcfg.get(env_key)
+            if env_name and os.environ.get(env_name):
+                proxy[key] = os.environ[env_name]
+        return {"proxy": proxy}
+
+    def _allowed_host(self, host: str) -> bool:
+        if _ALLOW_HOST_RE.search(host or ""):
+            return True
+        for url_key in ("target.base_url", "target.registration_url"):
+            u = self.cfg.get(url_key, "")
+            if u and urllib.parse.urlparse(u).hostname == host:
+                return True
+        return False
+
+    def _bandwidth_route(self, route) -> None:
+        """Abort requests that only cost proxy bandwidth: analytics,
+        cross-origin fonts/images, media. Functional hosts (app, captcha
+        CDN) are always allowed — the iconfont slider is a font file."""
+        try:
+            req = route.request
+            host = urllib.parse.urlparse(req.url).hostname or ""
+            rtype = req.resource_type
+            if _DENY_RE.search(req.url):
+                route.abort()
+                return
+            if rtype == "media":
+                route.abort()
+                return
+            if rtype in ("image", "font") and not self._allowed_host(host):
+                route.abort()
+                return
+            route.continue_()
+        except Exception:
+            try:
+                route.continue_()
+            except Exception:
+                pass
+
+    def _count_bytes(self, response) -> None:
+        try:
+            self.bytes_used += int(response.headers.get("content-length") or 0)
+        except Exception:
+            pass
 
     def _open_context(self) -> None:
         headless = bool(self.cfg.get("browser.headless", True))
@@ -87,9 +163,13 @@ class BrowserDriver:
                 "--disable-blink-features=AutomationControlled",
                 *(self.cfg.get("browser.args", []) or []),
             ],
+            **self._proxy_kwargs(),
         )
         install_token_hook(self.context)
         self.context.on("response", self._capture_response)
+        self.context.on("response", self._count_bytes)
+        if self.cfg.get("browser.optimize_bandwidth", True):
+            self.context.route("**/*", self._bandwidth_route)
         self.context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
