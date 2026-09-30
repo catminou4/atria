@@ -157,6 +157,10 @@ class BrowserDriver:
             viewport=vp,
             # Retina Mac scale — dpr=1 is a VM tell.
             device_scale_factor=float(self.cfg.get("browser.device_scale_factor", 2)),
+            # Locale/timezone must agree with the egress IP's geography —
+            # a US-IP + UTC browser is a proxy tell.
+            locale=self.cfg.get("browser.locale", "fr-FR"),
+            timezone_id=self.cfg.get("browser.timezone_id", "Europe/Paris"),
             args=[
                 # Otherwise navigator.webdriver stays true and the risk
                 # engine flags the session pre-slide.
@@ -171,7 +175,34 @@ class BrowserDriver:
         if self.cfg.get("browser.optimize_bandwidth", True):
             self.context.route("**/*", self._bandwidth_route)
         self.context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            """(() => {
+              Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+              // Bare-VM hardware tells: 2 cores / unknown memory is not a
+              // retail Mac. Present an M2-class machine.
+              const hw = (k, v) => Object.defineProperty(navigator, k,
+                {get: () => v});
+              hw('hardwareConcurrency', 8);
+              hw('deviceMemory', 8);
+              // Screen vs viewport: the VM's 1024x768 X-server is smaller
+              // than our 1440x900 viewport — impossible geometry on a real
+              // machine. Retina MBP 14\": 1512x982 CSS px.
+              const S = {width: 1512, height: 982, availWidth: 1512,
+                availHeight: 927, availLeft: 0, availTop: 0,
+                colorDepth: 30, pixelDepth: 30};
+              for (const k in S)
+                Object.defineProperty(screen, k, {get: () => S[k]});
+              // Fresh-profile tell: permissions.query('notifications')
+              // reports 'denied' under automation, 'prompt' on real Chrome.
+              const q = navigator.permissions && navigator.permissions.query;
+              if (q) {
+                navigator.permissions.query = (p) =>
+                  p && p.name === 'notifications'
+                    ? Promise.resolve({state: 'prompt', onchange: null,
+                        addEventListener(){}, removeEventListener(){},
+                        dispatchEvent(){return true}})
+                    : q.call(navigator.permissions, p);
+              }
+            })();"""
         )
         renderer = self.cfg.get(
             "browser.webgl_renderer",
@@ -372,16 +403,32 @@ class BrowserDriver:
                 self.page.wait_for_timeout(2000)
                 break
         field = self._first_selector("email_input", "email input")
-        field.fill(email)
+        self._human_type(field, email)
         submit = self._first_selector("submit", "submit button")
+        # Human read-back pause before committing the form.
+        self.page.wait_for_timeout(random.Random().randint(350, 1200))
         submit.click()
         self.page.wait_for_timeout(1500)
+
+    def _human_type(self, field, text: str) -> None:
+        """Click + per-char key events — fill() fires no keydown/keyup and
+        a pasted email with zero keystrokes is a form-level bot tell."""
+        rng = random.Random()
+        field.click()
+        self.page.wait_for_timeout(rng.randint(120, 400))
+        for ch in text:
+            self.page.keyboard.type(ch)
+            # ~90-140 wpm with occasional longer hesitations.
+            dt = rng.gauss(85, 30)
+            if rng.random() < 0.04:
+                dt += rng.uniform(200, 600)
+            self.page.wait_for_timeout(max(20, int(dt)))
 
     def enter_verification_code(self, code: str) -> None:
         """Code flow (Logto): the email carries a numeric code, entered on
         the same auth page after the captcha check passes."""
         field = self._first_selector("code_input", "verification-code input")
-        field.fill(code)
+        self._human_type(field, code)
         submit = self._first_selector("code_submit", "code submit button")
         submit.click()
         assert self.page is not None

@@ -84,6 +84,10 @@ browser:
   # Abort analytics/cross-origin fonts+images/media — cuts egress bytes
   # (matters when traffic rides a paid proxy). Captcha/app hosts exempt.
   optimize_bandwidth: true
+  # Browser locale + timezone must agree with the egress IP geography —
+  # mismatch is a proxy tell. FR defaults match a French residential IP.
+  locale: fr-FR
+  timezone_id: Europe/Paris
   # Per-context egress proxy — flip on/off from the dashboard switch
   # (keys/overrides.json). Fill server when you have a residential
   # endpoint; creds come from the env vars, never committed here.

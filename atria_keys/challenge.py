@@ -561,6 +561,9 @@ class AlibabaCloudChallengeDriver:
             "slide distance %.0fpx (confidence %.2f, %s)", distance, confidence, method
         )
 
+        # Reading pause — a human studies the puzzle for a moment before
+        # grabbing the handle. Solve-latency is a scored signal.
+        page.wait_for_timeout(self.rng.uniform(700, 1900))
         approach = generate_approach_path((0, 0), (hx, hy), self.rng)
         slide = generate_slide_path(distance, self.rng)
         for x, y, dt in approach:
