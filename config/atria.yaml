@@ -47,27 +47,19 @@ mailbox:
   # the slide — verified live: the SAME solve passes with @gmail.com.
   # For real runs use imap below: a single Gmail receives every
   # user+tag@gmail.com alias, so one inbox covers all runs.
-  reader: tempmaillol
-  # --- gmail catch-all (fill in + export ATRIA_IMAP_PASSWORD) --------
-  # reader: imap
-  # catchall_domain: gmail.com
-  # address_template: "YOURNAME+{run_id}@{catchall_domain}"
-  # imap:
-  #   host: imap.gmail.com
-  #   port: 993
-  #   username: YOURNAME@gmail.com
-  #   password_env: ATRIA_IMAP_PASSWORD   # Google app-password
-  #   folder: INBOX
+  reader: imap
+  # --- gmail catch-all (export ATRIA_IMAP_PASSWORD = app-password) ----
+  # reader: tempmaillol  # disposable domains are rejected by captcha/verify
   tempmail:
     api_base: https://api.mail.tm
   tempmaillol:
     api_base: https://api.tempmail.lol
-  catchall_domain: example.com
-  address_template: svc-{run_id}@{catchall_domain}
+  catchall_domain: gmail.com
+  address_template: lfst.c14+{run_id}@{catchall_domain}
   imap:
-    host: imap.example.com
+    host: imap.gmail.com
     port: 993
-    username: catchall@example.com
+    username: lfst.c14@gmail.com
     password_env: ATRIA_IMAP_PASSWORD
     folder: INBOX
   fixture:

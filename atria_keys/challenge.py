@@ -458,20 +458,30 @@ class AlibabaCloudChallengeDriver:
 
     def _open_widget(self, page: Page, frame: Frame) -> None:
         """AliyunCaptcha v2 mounts a collapsed box; the puzzle panel only
-        exists after the opener is clicked."""
-        for sel in OPENER_SELECTORS:
-            opener = frame.query_selector(sel)
-            if opener is None:
+        exists after the opener is clicked. The widget session init can be
+        slow/throttled — retry the click instead of failing on one shot."""
+        for attempt in range(3):
+            frame = self._find_widget_frame(page) or frame
+            clicked = False
+            for sel in OPENER_SELECTORS:
+                opener = frame.query_selector(sel)
+                if opener is None:
+                    continue
+                try:
+                    opener.click()
+                    clicked = True
+                except Exception:
+                    continue
+                break
+            if not clicked:
+                page.wait_for_timeout(1500)
                 continue
-            try:
-                opener.click()
-            except Exception:
-                continue
-            deadline = time.monotonic() + 8
+            deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 if self._rendered(self._pick_opt(frame, HANDLE_SELECTORS)):
                     return
                 page.wait_for_timeout(150)
+            page.wait_for_timeout(1500)
         raise DeadSelectorError(
             "captcha opener clicked but no slider handle appeared"
         )
