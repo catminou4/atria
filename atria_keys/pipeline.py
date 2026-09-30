@@ -54,6 +54,7 @@ class Pipeline:
             artifacts_dir=self.artifacts_dir,
             max_attempts=int(cfg.get("challenge.max_attempts_per_run", 3)),
             post_solve_wait_ms=int(cfg.get("challenge.post_solve_wait_ms", 2500)),
+            opener_deadline_s=float(cfg.get("challenge.opener_deadline_s", 25)),
             captured_token_fn=lambda: (
                 self._driver.captured_token() if self._driver else None
             ),

@@ -284,10 +284,12 @@ class AlibabaCloudChallengeDriver:
         post_solve_wait_ms: int = 2500,
         seed: int | None = None,
         captured_token_fn=None,
+        opener_deadline_s: float = 10.0,
     ):
         self.artifacts_dir = Path(artifacts_dir)
         self.max_attempts = max_attempts
         self.post_solve_wait_ms = post_solve_wait_ms
+        self.opener_deadline_s = opener_deadline_s
         self.rng = random.Random(seed)
         # Returns the freshest token the driver's network tap captured.
         self.captured_token_fn = captured_token_fn or (lambda: None)
@@ -462,6 +464,10 @@ class AlibabaCloudChallengeDriver:
         slow/throttled — retry the click instead of failing on one shot."""
         for attempt in range(3):
             frame = self._find_widget_frame(page) or frame
+            # The panel may have mounted during the previous attempt's
+            # settle wait — re-clicking the opener would toggle it shut.
+            if self._rendered(self._pick_opt(frame, HANDLE_SELECTORS)):
+                return
             clicked = False
             for sel in OPENER_SELECTORS:
                 opener = frame.query_selector(sel)
@@ -476,7 +482,7 @@ class AlibabaCloudChallengeDriver:
             if not clicked:
                 page.wait_for_timeout(1500)
                 continue
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + self.opener_deadline_s
             while time.monotonic() < deadline:
                 if self._rendered(self._pick_opt(frame, HANDLE_SELECTORS)):
                     return

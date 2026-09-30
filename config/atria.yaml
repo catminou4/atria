@@ -84,6 +84,9 @@ challenge:
   max_attempts_per_run: 3
   post_solve_wait_ms: 4000
   max_attempts_per_day: 60
+  # Seconds to wait for the slider handle after clicking the widget
+  # opener — a slow proxy needs longer than a local line.
+  opener_deadline_s: 30
 browser:
   headless: false
   # Retail Google Chrome binary — the Playwright-bundled "Chrome for
