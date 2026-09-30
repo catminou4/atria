@@ -429,8 +429,13 @@ class BrowserDriver:
         the same auth page after the captcha check passes."""
         field = self._first_selector("code_input", "verification-code input")
         self._human_type(field, code)
-        submit = self._first_selector("code_submit", "code submit button")
-        submit.click()
+        try:
+            submit = self._first_selector("code_submit", "code submit button")
+            submit.click()
+        except DeadSelectorError:
+            # Logto verification forms are real <form>s — Enter submits.
+            log.info("no code_submit selector matched; pressing Enter")
+            self.page.keyboard.press("Enter")
         assert self.page is not None
         self.page.wait_for_timeout(2500)
 

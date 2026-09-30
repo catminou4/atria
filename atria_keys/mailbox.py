@@ -18,6 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from dataclasses import dataclass, field
 from email import message_from_bytes
 from email.message import Message
@@ -60,6 +61,29 @@ def render_address(template: str, run_id: str, domain: str) -> str:
     return template.format(run_id=run_id, catchall_domain=domain)
 
 
+def gmail_dot_variant(local: str, run_id: str, domain: str) -> str:
+    """Gmail canonicalizes dots in the local part, so inserting dots in
+    gap positions yields addresses that all land in one inbox while
+    looking distinct to sites that only block '+tag' subaddressing.
+    run_id bits choose the dot pattern; alternating gmail.com /
+    googlemail.com doubles the space."""
+    try:
+        bits = int(run_id.replace("-", ""), 16)
+    except ValueError:
+        bits = zlib.crc32(run_id.encode())
+    # Canonicalize first — dots already in `local` would otherwise yield
+    # illegal consecutive dots (a.b + inserted . -> a..b).
+    clean = local.replace(".", "")
+    gaps = len(clean) - 1
+    out = [clean[0]]
+    for i, ch in enumerate(clean[1:]):
+        if i < gaps and (bits >> i) & 1:
+            out.append(".")
+        out.append(ch)
+    dom = "googlemail.com" if (bits >> gaps) & 1 else domain
+    return "".join(out) + "@" + dom
+
+
 class FixtureMailboxReader:
     """Polls a local outbox directory for `<recipient>.txt|.eml` files.
     Used by the offline fixture mode and tests."""
@@ -97,15 +121,20 @@ class ImapMailboxReader:
     recipient and extracts the verification link / OTP."""
 
     def __init__(self, host: str, port: int, username: str, password_env: str,
-                 folder: str, template: str, domain: str):
+                 folder: str, template: str, domain: str,
+                 alias_mode: str = "tag"):
         self.host, self.port = host, port
         self.username = username
         self.password_env = password_env
         self.folder = folder
         self.template = template
         self.domain = domain
+        self.alias_mode = alias_mode
 
     def allocate_address(self, run_id: str) -> str:
+        if self.alias_mode == "dots":
+            local = self.username.split("@")[0]
+            return gmail_dot_variant(local, run_id, self.domain)
         return render_address(self.template, run_id, self.domain)
 
     def _connect(self) -> imaplib.IMAP4_SSL:
@@ -135,7 +164,14 @@ class ImapMailboxReader:
         return "\n".join(parts)
 
     def _scan(self, conn: imaplib.IMAP4_SSL, recipient: str) -> VerificationMessage | None:
-        typ, data = conn.search(None, f'(TO "{recipient}")')
+        # Dotted aliases land in the same gmail box — the recipient string
+        # can appear in To:, Delivered-To:, or X-Original-To:.
+        typ, data = conn.search(
+            None,
+            'OR', 'OR', f'(TO "{recipient}")',
+            f'(HEADER Delivered-To "{recipient}")',
+            f'(HEADER X-Original-To "{recipient}")',
+        )
         if typ != "OK" or not data or not data[0]:
             return None
         for num in data[0].split():
@@ -379,6 +415,7 @@ def build_reader_for_kind(cfg, kind: str) -> MailboxReader:
             folder=cfg.get("mailbox.imap.folder", "INBOX"),
             template=template,
             domain=domain,
+            alias_mode=cfg.get("mailbox.imap.alias_mode", "tag"),
         )
     raise ValueError(f"unknown mailbox reader: {kind}")
 

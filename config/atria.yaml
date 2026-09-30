@@ -30,6 +30,15 @@ target:
     - input[inputmode=numeric]
     code_submit:
     - button[type=submit]
+    - 'button:has-text("Verify")'
+    - 'button:has-text("Continue")'
+    - 'button:has-text("Confirm")'
+    - 'button:has-text("Sign in")'
+    - 'button:has-text("Submit")'
+    - 'button:has-text("Vérifier")'
+    - 'button:has-text("Confirmer")'
+    - 'button:has-text("验证")'
+    - 'button:has-text("确认")'
     console_create_button:
     - button:has-text('创建')
     - button:has-text('新建')
@@ -62,6 +71,10 @@ mailbox:
     username: lfst.c14@gmail.com
     password_env: ATRIA_IMAP_PASSWORD
     folder: INBOX
+    # 'tag' = lfst.c14+{run_id}@gmail.com (blocked by some signup gates);
+    # 'dots' = gmail dot permutations (l.f.s.t.c.1.4@…) + googlemail.com
+    # aliases — same inbox, addresses that read as unique upstream.
+    alias_mode: dots
   fixture:
     outbox_dir: tests/fixtures/outbox
   poll_interval_s: 5
