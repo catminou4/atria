@@ -87,6 +87,11 @@ challenge:
   # Seconds to wait for the slider handle after clicking the widget
   # opener — a slow proxy needs longer than a local line.
   opener_deadline_s: 30
+  # auto: the solver drags. manual: the widget opens and the run waits
+  # for a human to slide (dashboard switch overrides this).
+  mode: auto
+  # How long a manual run waits for the human's slide per attempt.
+  manual_timeout_s: 240
 browser:
   headless: false
   # Retail Google Chrome binary — the Playwright-bundled "Chrome for
@@ -144,4 +149,7 @@ artifacts:
 run:
   stage_retries: 2
   retry_jitter_s: 5
+  # Accounts in flight at once — each gets its own browser window.
+  # >1 is for manual captcha mode (dashboard switch overrides this).
+  workers: 1
   page_settle_ms: 2000

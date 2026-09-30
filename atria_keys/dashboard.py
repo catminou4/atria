@@ -97,6 +97,14 @@ def build_body(state: StateStore, keystore: KeyStore, artifacts_dir: Path,
         parts.append(f"mailbox: {_switch_button('mailbox_reader', mb, ['imap', 'tempmaillol'])}")
         parts.append("&nbsp;&nbsp;")
         parts.append(f"egress: {_switch_button('proxy', px, ['direct', 'proxy'])}")
+        parts.append("&nbsp;&nbsp;")
+        parts.append(
+            f"captcha: {_switch_button('challenge_mode', overrides.challenge_mode(cfg), ['auto', 'manual'])}")
+        parts.append("&nbsp;&nbsp;")
+        wk = overrides.run_workers(cfg)
+        parts.append(
+            "workers: "
+            + _switch_button('run_workers', str(wk), ['1', '2', '3', '4', '6', '8']))
         parts.append("</p>")
 
     runs = state.list_runs()
@@ -214,6 +222,12 @@ class _Handler(BaseHTTPRequestHandler):
             px = (form.get("proxy") or [None])[0]
             if px in overrides.PROXY_MODES:
                 updates["proxy"] = px
+            cm = (form.get("challenge_mode") or [None])[0]
+            if cm in overrides.CHALLENGE_MODES:
+                updates["challenge_mode"] = cm
+            wk = (form.get("run_workers") or [None])[0]
+            if wk is not None and wk.isdigit():
+                updates["run_workers"] = int(wk)
             if updates:
                 overrides.write(self.cfg, **updates)
             self.send_response(303)

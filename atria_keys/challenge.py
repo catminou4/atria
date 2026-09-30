@@ -287,11 +287,15 @@ class AlibabaCloudChallengeDriver:
         seed: int | None = None,
         captured_token_fn=None,
         opener_deadline_s: float = 10.0,
+        manual: bool = False,
+        manual_timeout_s: float = 240.0,
     ):
         self.artifacts_dir = Path(artifacts_dir)
         self.max_attempts = max_attempts
         self.post_solve_wait_ms = post_solve_wait_ms
         self.opener_deadline_s = opener_deadline_s
+        self.manual = manual
+        self.manual_timeout_s = manual_timeout_s
         self.rng = random.Random(seed)
         # Returns the freshest token the driver's network tap captured.
         self.captured_token_fn = captured_token_fn or (lambda: None)
@@ -710,6 +714,27 @@ class AlibabaCloudChallengeDriver:
         page.mouse.up()
         return distance, method
 
+    def _wait_human(self, page: Page, frame: Frame) -> tuple[float | None, str]:
+        """Manual mode: the widget is open, a human drags the slider.
+        Poll for the outcome — solved, server-rejected, widget-failed —
+        and return so the shared post-solve verdict logic runs. A timeout
+        just means the human hasn't finished yet on this puzzle instance.
+        """
+        log.info("manual mode: solve the slider in the browser window "
+                 "(waiting up to %.0fs)", self.manual_timeout_s)
+        deadline = time.monotonic() + self.manual_timeout_s
+        while time.monotonic() < deadline:
+            if self._server_rejected(page):
+                return None, "manual"  # post-solve check handles the reject
+            if self._attempt_succeeded(frame):
+                return None, "manual"
+            if self.captured_token_fn():
+                return None, "manual"
+            frame = self._find_widget_frame(page)
+            page.wait_for_timeout(400)
+        raise ChallengeRejected(
+            f"manual solve timeout after {self.manual_timeout_s:.0f}s")
+
     def _read_token(self, page: Page, frame: Frame, timeout_ms: int) -> str | None:
         deadline = time.monotonic() + timeout_ms / 1000.0
         while time.monotonic() < deadline:
@@ -780,7 +805,10 @@ class AlibabaCloudChallengeDriver:
             track = self._pick(frame, TRACK_SELECTORS, "slider track")
             log.info("challenge attempt %d/%d", attempt, self.max_attempts)
             try:
-                distance, method = self._drag(page, frame, handle, track)
+                if self.manual:
+                    distance, method = self._wait_human(page, frame)
+                else:
+                    distance, method = self._drag(page, frame, handle, track)
             except ChallengeRejected as exc:
                 # Low-confidence distance → fresh puzzle, not a fresh guess.
                 frame = self._reload_widget(page)

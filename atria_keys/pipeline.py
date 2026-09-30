@@ -7,6 +7,7 @@ Transient failures retry with jitter; fatal failures log and move on.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import random
@@ -14,6 +15,7 @@ import time
 import uuid
 from typing import Any, Callable
 
+from . import overrides
 from .challenge import CHALLENGE_DRIVERS, ChallengeResult
 from .driver import BrowserDriver
 from .errors import (
@@ -55,6 +57,8 @@ class Pipeline:
             max_attempts=int(cfg.get("challenge.max_attempts_per_run", 3)),
             post_solve_wait_ms=int(cfg.get("challenge.post_solve_wait_ms", 2500)),
             opener_deadline_s=float(cfg.get("challenge.opener_deadline_s", 25)),
+            manual=overrides.challenge_mode(cfg) == "manual",
+            manual_timeout_s=float(cfg.get("challenge.manual_timeout_s", 240)),
             captured_token_fn=lambda: (
                 self._driver.captured_token() if self._driver else None
             ),
@@ -63,24 +67,74 @@ class Pipeline:
     # -- orchestration -----------------------------------------------------
 
     def orchestrate(self, count: int) -> list[str]:
+        workers = overrides.run_workers(self.cfg)
+        if workers > 1:
+            return self._orchestrate_parallel(count, workers)
         run_ids = []
         for _ in range(count):
-            paused = self.state.paused()
-            if paused:
-                log.error("kill switch engaged (%s) — halting orchestration", paused)
-                self.state.event(None, None, "orchestration_paused", paused)
+            run_id = self._start_run(run_ids)
+            if run_id is None:
                 break
-            run_id = uuid.uuid4().hex[:12]
-            try:
-                self.pacer.wait_for_slot(run_id)
-            except PacingHalt as exc:
-                self.state.event(run_id, None, "pacing_halt", str(exc))
-                self.state.set_control("paused", str(exc))
-                log.error("pacing halt: %s", exc)
-                break
-            self.state.new_run(run_id)
-            run_ids.append(run_id)
             self.run(run_id)
+        return run_ids
+
+    def _start_run(self, run_ids: list[str], honor_gap: bool = True) -> str | None:
+        """Claim a pacing slot and register the run. Returns None when
+        orchestration must stop (kill switch or pacing halt)."""
+        paused = self.state.paused()
+        if paused:
+            log.error("kill switch engaged (%s) — halting orchestration", paused)
+            self.state.event(None, None, "orchestration_paused", paused)
+            return None
+        run_id = uuid.uuid4().hex[:12]
+        try:
+            if honor_gap:
+                self.pacer.wait_for_slot(run_id)
+            elif self.state.runs_today() >= self.pacer.max_per_day:
+                raise PacingHalt(
+                    f"daily cap reached ({self.pacer.max_per_day} runs/day)")
+        except PacingHalt as exc:
+            self.state.event(run_id, None, "pacing_halt", str(exc))
+            self.state.set_control("paused", str(exc))
+            log.error("pacing halt: %s", exc)
+            return None
+        self.state.new_run(run_id)
+        run_ids.append(run_id)
+        return run_id
+
+    def _orchestrate_parallel(self, count: int, workers: int) -> list[str]:
+        """Manual-batch mode: N runs at once, each in its own thread,
+        browser, and pipeline. Slots are claimed serially first (pacing
+        still applies), then runs execute concurrently — each pauses at
+        the captcha for the human."""
+        run_ids: list[str] = []
+        pending: list[str] = []
+        for i in range(count):
+            # First run of the batch honors the inter-run pacing gap;
+            # the rest launch together — the human solver is the rate
+            # limit, not a wall-clock interval.
+            run_id = self._start_run(run_ids, honor_gap=(i == 0))
+            if run_id is None:
+                break
+            pending.append(run_id)
+        if not pending:
+            return run_ids
+        log.info("orchestrating %d run(s) across %d worker(s)",
+                 len(pending), workers)
+
+        def _work(run_id: str):
+            sub = Pipeline(
+                self.cfg, self.state, self.keystore, self.mailbox,
+                self.pacer, driver_factory=self.driver_factory,
+                sleep=self.sleep,
+            )
+            return sub.run(run_id)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            for fut in concurrent.futures.as_completed(
+                [ex.submit(_work, rid) for rid in pending]
+            ):
+                fut.result()
         return run_ids
 
     # -- single run ---------------------------------------------------------

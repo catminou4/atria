@@ -71,11 +71,18 @@ class BrowserDriver:
         self._pw: Playwright | None = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
+        profile = cfg.get("browser.profile") or run_id
+        if overrides.run_workers(cfg) > 1:
+            # Parallel workers can't share one profile dir — Chromium's
+            # SingletonLock refuses a second context on the same path.
+            # Each run gets its own (named after the shared profile so
+            # manual-mode dirs stay recognizable).
+            profile = f"{profile}-{run_id}"
         self.user_data_dir = (
             # A stable profile lets device-trust state (cookies, history)
             # accumulate across runs instead of every run starting cold.
             cfg.path("browser.session_dir", "keys/sessions")
-            / (cfg.get("browser.profile") or run_id)
+            / profile
         )
         self.captured: list[dict] = []
         self._generation = 0

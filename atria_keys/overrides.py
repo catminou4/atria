@@ -12,6 +12,7 @@ from pathlib import Path
 
 MAILBOX_KINDS = ("imap", "tempmaillol")
 PROXY_MODES = ("direct", "proxy")
+CHALLENGE_MODES = ("auto", "manual")
 
 
 def _path(cfg) -> Path:
@@ -49,3 +50,20 @@ def proxy_enabled(cfg) -> bool:
     if mode in PROXY_MODES:
         return mode == "proxy"
     return bool(cfg.get("browser.proxy.enabled", False))
+
+
+def challenge_mode(cfg) -> str:
+    mode = read(cfg).get("challenge_mode")
+    if mode in CHALLENGE_MODES:
+        return mode
+    base = cfg.get("challenge.mode", "auto")
+    return base if base in CHALLENGE_MODES else "auto"
+
+
+def run_workers(cfg) -> int:
+    raw = read(cfg).get("run_workers")
+    try:
+        n = int(raw) if raw is not None else int(cfg.get("run.workers", 1))
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(8, n))
