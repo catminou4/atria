@@ -67,3 +67,13 @@ def run_workers(cfg) -> int:
     except (TypeError, ValueError):
         return 1
     return max(1, min(8, n))
+
+
+def max_runs_per_day(cfg) -> int:
+    raw = read(cfg).get("max_runs_day")
+    try:
+        n = int(raw) if raw is not None else int(
+            cfg.get("pacing.max_runs_per_day", 30))
+    except (TypeError, ValueError):
+        return 30
+    return max(1, min(500, n))

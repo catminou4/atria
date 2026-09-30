@@ -86,6 +86,9 @@ class Pipeline:
             log.error("kill switch engaged (%s) — halting orchestration", paused)
             self.state.event(None, None, "orchestration_paused", paused)
             return None
+        # Dashboard override applies to the next run — the pacer's own
+        # cap check reads this value.
+        self.pacer.max_per_day = overrides.max_runs_per_day(self.cfg)
         run_id = uuid.uuid4().hex[:12]
         try:
             if honor_gap:

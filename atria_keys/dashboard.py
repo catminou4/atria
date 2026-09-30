@@ -105,6 +105,12 @@ def build_body(state: StateStore, keystore: KeyStore, artifacts_dir: Path,
         parts.append(
             "workers: "
             + _switch_button('run_workers', str(wk), ['1', '2', '3', '4', '6', '8']))
+        parts.append("&nbsp;&nbsp;")
+        parts.append(
+            f"<form method='post' action='/api/settings' style='display:inline'>"
+            f"runs/day: <input type='number' name='max_runs_day' min='1' max='500' "
+            f"value='{overrides.max_runs_per_day(cfg)}' style='width:64px'>"
+            f"<button type='submit'>set</button></form>")
         parts.append("</p>")
 
     runs = state.list_runs()
@@ -228,6 +234,9 @@ class _Handler(BaseHTTPRequestHandler):
             wk = (form.get("run_workers") or [None])[0]
             if wk is not None and wk.isdigit():
                 updates["run_workers"] = int(wk)
+            md = (form.get("max_runs_day") or [None])[0]
+            if md is not None and md.isdigit():
+                updates["max_runs_day"] = int(md)
             if updates:
                 overrides.write(self.cfg, **updates)
             self.send_response(303)
