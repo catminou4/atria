@@ -88,7 +88,11 @@ def build_body(state: StateStore, keystore: KeyStore, artifacts_dir: Path,
 
     paused = state.paused()
     if paused:
-        parts.append(f"<p class='banner'>PAUSED — {html.escape(paused)}</p>")
+        parts.append(
+            f"<p class='banner'>PAUSED — {html.escape(paused)} "
+            "<form method='post' action='/api/settings' style='display:inline'>"
+            "<input type='hidden' name='resume' value='1'>"
+            "<button type='submit'>resume</button></form></p>")
 
     if cfg is not None:
         mb = overrides.mailbox_reader(cfg)
@@ -222,6 +226,8 @@ class _Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             form = urllib.parse.parse_qs(self.rfile.read(length).decode())
             updates = {}
+            if (form.get("resume") or [None])[0]:
+                self.state.clear_pause()
             mb = (form.get("mailbox_reader") or [None])[0]
             if mb in overrides.MAILBOX_KINDS:
                 updates["mailbox_reader"] = mb
@@ -239,6 +245,11 @@ class _Handler(BaseHTTPRequestHandler):
                 updates["max_runs_day"] = int(md)
             if updates:
                 overrides.write(self.cfg, **updates)
+                # Raising limits after a pacing halt implies resume —
+                # clear it so the user doesn't hit a stale kill-switch.
+                reason = self.state.paused() or ""
+                if "cap reached" in reason or "circuit breaker" in reason:
+                    self.state.clear_pause()
             self.send_response(303)
             self.send_header("Location", "/")
             self.end_headers()
