@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+import cv2
+import numpy as np
 from playwright.sync_api import Frame, Page
 
 from .errors import (
@@ -505,7 +507,10 @@ class AlibabaCloudChallengeDriver:
             return None
 
     def _dump_puzzle(self, reason: str) -> None:
-        """Persist the last captured puzzle images for offline analysis."""
+        """Persist the last captured puzzle images for offline analysis.
+        The bg gets an annotated copy with the detected gap x drawn in —
+        comparing the line against the visible hole shows instantly
+        whether a rejection was bad detection or server-side scoring."""
         if not self._last_puzzle or not self._last_puzzle.get("bg"):
             return
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -514,6 +519,24 @@ class AlibabaCloudChallengeDriver:
             data = self._last_puzzle.get(name)
             if data:
                 (self.artifacts_dir / f"challenge-{reason}-{name}-{ts}.png").write_bytes(data)
+        gap_x = self._last_puzzle.get("gap_x")
+        if gap_x is not None:
+            try:
+                img = cv2.imdecode(
+                    np.frombuffer(self._last_puzzle["bg"], np.uint8),
+                    cv2.IMREAD_COLOR,
+                )
+                if img is not None:
+                    x = int(round(gap_x))
+                    cv2.line(img, (x, 0), (x, img.shape[0]), (0, 0, 255), 3)
+                    ok, enc = cv2.imencode(".png", img)
+                    if ok:
+                        (
+                            self.artifacts_dir
+                            / f"challenge-{reason}-annotated-{ts}.png"
+                        ).write_bytes(enc.tobytes())
+            except Exception:
+                pass
 
     def _dump_panel(self, page: Page, reason: str) -> None:
         """Screenshot the widget panel post-verdict — shows where the
